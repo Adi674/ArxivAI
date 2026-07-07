@@ -12,7 +12,7 @@ from sqlalchemy.sql import func
 import uuid
 from datetime import datetime
 
-from database import Base
+from src.database import Base
 
 
 # ============================================================================

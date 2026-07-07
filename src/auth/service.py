@@ -72,7 +72,7 @@ def create_access_token(user_id: str, expires_delta: Optional[timedelta] = None)
         Exception: If token creation fails
     """
     if expires_delta is None:
-        expires_delta = timedelta(hours=settings.jwt_expire_hours)
+        expires_delta = timedelta(hours=settings.JWT_EXPIRE_HOURS)
     
     expire_time = datetime.utcnow() + expires_delta
     expires_in_seconds = int(expires_delta.total_seconds())
@@ -87,8 +87,8 @@ def create_access_token(user_id: str, expires_delta: Optional[timedelta] = None)
     try:
         encoded_jwt = jwt.encode(
             payload,
-            settings.jwt_secret,
-            algorithm=settings.jwt_algorithm,
+            settings.JWT_SECRET,
+            algorithm=settings.JWT_ALGORITHM,
         )
         logger.debug(f"✅ Created JWT token for user {user_id}")
         return encoded_jwt, expires_in_seconds
@@ -113,8 +113,8 @@ def decode_token(token: str) -> Optional[str]:
     try:
         payload = jwt.decode(
             token,
-            settings.jwt_secret,
-            algorithms=[settings.jwt_algorithm],
+            settings.JWT_SECRET,
+            algorithms=[settings.JWT_ALGORITHM],
         )
         user_id: str = payload.get("sub")
         
@@ -231,43 +231,75 @@ async def login_user(
     )
 
 
+from fastapi import Depends, Header, HTTPException, status
+from src.database import get_session
+
+async def get_token_from_header(
+    authorization: str = Header(None)
+) -> str:
+    """
+    Extract JWT token from Authorization header.
+    """
+    if not authorization:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing Authorization header",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Authorization header format. Use: Bearer <token>",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    return parts[1]
+
+
 # ── GET CURRENT USER ────────────────────────────────────────────────────
 async def get_current_user(
-    token: str,
-    db: AsyncSession
+    token: str = Depends(get_token_from_header),
+    db: AsyncSession = Depends(get_session)
 ) -> UserOut:
     """
     Get current user from JWT token.
     Used as FastAPI dependency for protected routes.
-    
-    Args:
-        token: JWT token from Authorization header
-        db: Database session
-    
-    Returns:
-        UserOut: Current user profile
-    
-    Raises:
-        ValueError: If token is invalid or user not found
     """
-    # Decode token
-    user_id = decode_token(token)
-    
-    # Fetch user from database
-    result = await db.execute(
-        select(User).where(User.id == uuid.UUID(user_id))
-    )
-    user = result.scalar_one_or_none()
-    
-    if not user:
-        logger.error(f"❌ User not found: {user_id}")
-        raise ValueError("User not found")
-    
-    if not user.is_active:
-        logger.warning(f"❌ Inactive user accessing protected route: {user_id}")
-        raise ValueError("Account is not active")
-    
-    return UserOut.model_validate(user)
+    try:
+        # Decode token
+        user_id = decode_token(token)
+        
+        # Fetch user from database
+        result = await db.execute(
+            select(User).where(User.id == uuid.UUID(user_id))
+        )
+        user = result.scalar_one_or_none()
+        
+        if not user:
+            logger.error(f"❌ User not found: {user_id}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        if not user.is_active:
+            logger.warning(f"❌ Inactive user accessing protected route: {user_id}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Account is not active",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        return UserOut.model_validate(user)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(e),
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 # ── GET USER BY ID ────────────────────────────────────────────────────

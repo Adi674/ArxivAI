@@ -41,13 +41,18 @@ def get_engine() -> AsyncEngine:
         # Use NullPool for development, QueuePool for production
         pool_class = NullPool if settings.DEBUG else QueuePool
         
+        engine_kwargs = {
+            "echo": settings.DATABASE_ECHO,
+            "poolclass": pool_class,
+            "pool_pre_ping": True,
+        }
+        if pool_class is not NullPool:
+            engine_kwargs["pool_size"] = settings.DATABASE_POOL_SIZE
+            engine_kwargs["max_overflow"] = settings.DATABASE_MAX_OVERFLOW
+            
         _engine = create_async_engine(
             settings.DATABASE_URL,
-            echo=settings.DATABASE_ECHO,
-            pool_class=pool_class,
-            pool_size=settings.DATABASE_POOL_SIZE,
-            max_overflow=settings.DATABASE_MAX_OVERFLOW,
-            pool_pre_ping=True,  # Verify connections before using
+            **engine_kwargs
         )
     return _engine
 
@@ -72,7 +77,7 @@ def get_async_session_maker():
     return _async_session_maker
 
 
-async def get_session() -> AsyncSession:
+async def get_session():
     """
     FastAPI dependency: get database session.
     

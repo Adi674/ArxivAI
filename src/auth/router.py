@@ -14,47 +14,12 @@ from src.auth.service import (
     login_user,
     get_current_user,
     get_user_by_email,
+    get_token_from_header,
 )
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
-
-
-# ── DEPENDENCY: Extract JWT from header ────────────────────────────────────
-async def get_token_from_header(
-    authorization: str = Header(None)
-) -> str:
-    """
-    Extract JWT token from Authorization header.
-    
-    Expected format: "Bearer <token>"
-    
-    Args:
-        authorization: Authorization header value
-    
-    Returns:
-        str: JWT token
-    
-    Raises:
-        HTTPException: If header is missing or invalid
-    """
-    if not authorization:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing Authorization header",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    parts = authorization.split()
-    if len(parts) != 2 or parts[0].lower() != "bearer":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid Authorization header format. Use: Bearer <token>",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    return parts[1]
 
 
 # ── ENDPOINT: Register ────────────────────────────────────────────────────

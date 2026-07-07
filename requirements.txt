@@ -26,3 +26,4 @@ python-dotenv==1.0.0
 numpy==1.26.3
 pytest==7.4.3
 pytest-asyncio==0.23.1
+email-validator

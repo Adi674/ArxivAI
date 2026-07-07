@@ -97,6 +97,8 @@ class TokenOut(BaseModel):
     )
 
 
+from uuid import UUID
+
 class UserOut(BaseModel):
     """
     Schema for user profile response.
@@ -112,7 +114,7 @@ class UserOut(BaseModel):
         created_at: Account creation timestamp
     """
     
-    id: str = Field(
+    id: UUID = Field(
         ...,
         description="User ID (UUID)",
     )
