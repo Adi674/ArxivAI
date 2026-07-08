@@ -96,6 +96,42 @@ async def root():
 
 
 # ─────────────────────────────────────────────────────────────
+# Prometheus Custom HTTP Middleware
+# ─────────────────────────────────────────────────────────────
+from prometheus_client import Counter, Histogram
+import time
+
+# Define metrics matching standard Grafana dashboard queries
+HTTP_REQUESTS_TOTAL = Counter(
+    "http_requests_total",
+    "Total HTTP requests",
+    ["method", "endpoint", "status"]
+)
+HTTP_REQUEST_DURATION_SECONDS = Histogram(
+    "http_request_duration_seconds",
+    "HTTP request duration in seconds",
+    ["method", "endpoint"]
+)
+
+@app.middleware("http")
+async def prometheus_middleware(request, call_next):
+    method = request.method
+    endpoint = request.url.path
+    
+    start_time = time.time()
+    response = await call_next(request)
+    duration = time.time() - start_time
+    
+    # Do not track Prometheus scraping of `/metrics` itself to prevent spam
+    if not (endpoint.startswith("/metrics") or endpoint.startswith("/favicon")):
+        status = str(response.status_code)
+        HTTP_REQUESTS_TOTAL.labels(method=method, endpoint=endpoint, status=status).inc()
+        HTTP_REQUEST_DURATION_SECONDS.labels(method=method, endpoint=endpoint).observe(duration)
+        
+    return response
+
+
+# ─────────────────────────────────────────────────────────────
 # Routers
 # ─────────────────────────────────────────────────────────────
 from src.auth.router import router as auth_router

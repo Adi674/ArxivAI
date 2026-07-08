@@ -41,7 +41,7 @@ async def download_pdf(pdf_url: str) -> Optional[bytes]:
     """
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.get(pdf_url)
+            response = await client.get(pdf_url, follow_redirects=True)
             response.raise_for_status()
             logger.info(f"Downloaded PDF: {pdf_url} ({len(response.content)} bytes)")
             return response.content
@@ -53,6 +53,29 @@ async def download_pdf(pdf_url: str) -> Optional[bytes]:
 # ─────────────────────────────────────────────────────────────
 # CHUNKING
 # ─────────────────────────────────────────────────────────────
+
+def sanitize_metadata(metadata: dict) -> dict:
+    """
+    Ensure all metadata values are str, int, float, or bool for Chroma compatibility.
+    Converts lists/dicts to strings.
+    """
+    sanitized = {}
+    for k, v in metadata.items():
+        if isinstance(v, (str, int, float, bool)):
+            sanitized[k] = v
+        elif isinstance(v, list):
+            if all(isinstance(x, str) for x in v):
+                sanitized[k] = ", ".join(v)
+            else:
+                import json
+                sanitized[k] = json.dumps(v)
+        elif v is None:
+            sanitized[k] = ""
+        else:
+            import json
+            sanitized[k] = json.dumps(v)
+    return sanitized
+
 
 def chunk_text(
     text: str,
@@ -74,6 +97,7 @@ def chunk_text(
 
     chunks = splitter.split_text(text)
     documents = []
+    sanitized_meta = sanitize_metadata(metadata)
 
     for i, chunk in enumerate(chunks):
         doc = Document(
@@ -81,7 +105,7 @@ def chunk_text(
             metadata={
                 "paper_id": paper_id,
                 "chunk_index": i,
-                **metadata,
+                **sanitized_meta,
             }
         )
         documents.append(doc)
@@ -112,7 +136,18 @@ async def ingest_paper(
     Returns:
         List of Chroma chunk IDs (store in papers.chroma_ids for future deletion).
     """
-    from src.vectordb.chroma_client import get_vectorstore
+    from src.vectordb.chroma_client import get_vectorstore, get_chroma_client
+
+    # Skip if paper is already ingested to prevent duplicate processing and download throttling
+    try:
+        client = get_chroma_client()
+        collection = client.get_collection("arxivai_papers")
+        existing = collection.get(where={"paper_id": paper_id}, limit=1)
+        if existing and existing.get("ids"):
+            logger.info(f"Paper {paper_id} is already in Chroma. Skipping ingestion.")
+            return existing["ids"]
+    except Exception:
+        pass
 
     # Step 1: Get PDF bytes
     if pdf_bytes is None and pdf_url:

@@ -1,2 +1,4 @@
 /.env
 /venv
+ingestion.log
+__pycache__
