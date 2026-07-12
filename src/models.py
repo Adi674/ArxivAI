@@ -86,6 +86,7 @@ class Paper(Base):
     # Relationships
     user = relationship("User", back_populates="papers")
     collaboration_papers = relationship("CollaborationPaper", back_populates="paper", cascade="all, delete-orphan")
+    chunks = relationship("PaperChunk", back_populates="paper", cascade="all, delete-orphan")
     
     def __repr__(self) -> str:
         return f"<Paper(id={self.id}, title={self.title})>"
@@ -434,3 +435,63 @@ class UserMemory(Base):
     
     def __repr__(self) -> str:
         return f"<UserMemory(user_id={self.user_id})>"
+
+
+# ============================================================================
+# PAPER CHUNKS (pgvector)
+# ============================================================================
+
+from sqlalchemy.types import UserDefinedType
+
+class PGVector(UserDefinedType):
+    """Custom SQLAlchemy type for PostgreSQL vector database column."""
+    def __init__(self, dim):
+        self.dim = dim
+
+    def get_col_spec(self, **kw):
+        return f"vector({self.dim})"
+
+    def bind_processor(self, dialect):
+        def process(value):
+            if value is None:
+                return None
+            if isinstance(value, list):
+                return f"[{','.join(map(str, value))}]"
+            return value
+        return process
+
+    def result_processor(self, dialect, coltype):
+        def process(value):
+            if value is None:
+                return None
+            if isinstance(value, str):
+                return [float(x) for x in value.strip('[]').split(',') if x]
+            return value
+        return process
+
+
+class PaperChunk(Base):
+    """Store text chunks and vector embeddings of academic papers"""
+    
+    __tablename__ = "paper_chunks"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    paper_id = Column(String(50), ForeignKey("papers.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    content = Column(Text, nullable=False)
+    chunk_index = Column(Integer, nullable=False)
+    
+    # We will use 512 dimensions for Gemini Matryoshka
+    embedding = Column(PGVector(512), nullable=False)
+    
+    # access control metadata (directly stored in table to make queries extremely fast and secure!)
+    user_id = Column(String(255), nullable=True, index=True)
+    visibility = Column(String(20), default="public", nullable=False, index=True)
+    domain = Column(String(50), nullable=False, index=True)
+    collaboration_id = Column(String(255), nullable=True, index=True)
+    
+    # Relationships
+    paper = relationship("Paper", back_populates="chunks")
+    
+    def __repr__(self) -> str:
+        return f"<PaperChunk(id={self.id}, paper_id={self.paper_id}, index={self.chunk_index})>"

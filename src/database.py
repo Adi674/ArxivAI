@@ -106,8 +106,14 @@ async def create_all_tables() -> None:
     Create all tables in database.
     Called once at app startup.
     """
+    from sqlalchemy import text
     engine = get_engine()
     async with engine.begin() as conn:
+        try:
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
+            logger.info("✅ PostgreSQL vector extension verified/enabled")
+        except Exception as e:
+            logger.warning(f"Could not automatically create vector extension (ensure pgvector is enabled in Supabase): {e}")
         await conn.run_sync(Base.metadata.create_all)
     logger.info("✅ Database tables created")
 

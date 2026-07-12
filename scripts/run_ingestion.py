@@ -130,12 +130,8 @@ async def main():
         sys.exit(1)
 
     settings = get_settings()
-    logger.info(f"Chroma path: {settings.CHROMA_PATH}")
     logger.info(f"Domains to ingest: {domains}")
     logger.info(f"Papers per domain: {args.num}")
-
-    # Ensure Chroma directory exists
-    os.makedirs(settings.CHROMA_PATH, exist_ok=True)
 
     start = datetime.utcnow()
     results = []

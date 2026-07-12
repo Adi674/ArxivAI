@@ -67,6 +67,8 @@ async def run_query(
         "needs_recent": False,
         "search_spaces": [],
         "fetch_arxiv_fresh": False,
+        "search_tool": "hybrid",        # Agent 3 will override this
+
         "retrieved_papers": [],
         "reformulation_count": 0,
         "findings": {},

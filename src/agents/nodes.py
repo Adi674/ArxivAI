@@ -91,7 +91,8 @@ def analyze_query(state: RAGState) -> RAGState:
 
 def decide_search_strategy(state: RAGState) -> RAGState:
     """
-    Decide which namespaces to search and whether to fetch fresh from arXiv.
+    Decide which namespaces to search, whether to fetch fresh from arXiv,
+    and which search tool to use (semantic | keyword | hybrid).
     """
     llm = get_llm("search_strategy", state["llm_mode"])
     prompt = SEARCH_STRATEGY_PROMPT.format(
@@ -105,16 +106,25 @@ def decide_search_strategy(state: RAGState) -> RAGState:
     result = _parse_json(raw, {
         "search_spaces": ["public"],
         "fetch_arxiv_fresh": False,
+        "search_tool": "hybrid",
     })
 
     spaces = result.get("search_spaces", ["public"])
     if state["needs_personal_papers"] and "user_private" not in spaces:
         spaces.append("user_private")
 
+    # Validate search_tool — fall back to hybrid if LLM returns unexpected value
+    tool = result.get("search_tool", "hybrid")
+    if tool not in ("semantic", "keyword", "hybrid"):
+        logger.warning(f"Invalid search_tool from LLM: '{tool}', defaulting to 'hybrid'")
+        tool = "hybrid"
+
     state["search_spaces"] = spaces
     state["fetch_arxiv_fresh"] = bool(result.get("fetch_arxiv_fresh", False))
+    state["search_tool"] = tool
     state["reasoning_trace"].append(
-        f"[Search Strategy] → spaces={state['search_spaces']}, arxiv_fresh={state['fetch_arxiv_fresh']}"
+        f"[Search Strategy] → spaces={state['search_spaces']}, "
+        f"arxiv_fresh={state['fetch_arxiv_fresh']}, search_tool={state['search_tool']}"
     )
     return state
 
@@ -123,15 +133,26 @@ def decide_search_strategy(state: RAGState) -> RAGState:
 # AGENT 4: Retriever
 # ─────────────────────────────────────────────────────────────
 
-def retrieve_papers(state: RAGState) -> RAGState:
+async def retrieve_papers(state: RAGState) -> RAGState:
     """
-    Search Chroma for relevant papers. Reformulates query if avg relevance < 0.6.
-    Falls back to fresh arXiv fetch if still low.
+    Retrieve papers using the search tool chosen by Agent 3.
+    Dispatches to semantic_search, keyword_search, or hybrid_search.
+    Reformulates query if avg relevance < 0.6 (max 2 times).
     """
-    from src.vectordb.searcher import semantic_search, calculate_avg_relevance
+    from src.vectordb.searcher import semantic_search, keyword_search, hybrid_search, calculate_avg_relevance
+
+    # Dispatch to the correct search tool
+    _SEARCH_TOOLS = {
+        "semantic": semantic_search,
+        "keyword": keyword_search,
+        "hybrid": hybrid_search,
+    }
+    tool_name = state.get("search_tool", "hybrid")
+    search_fn = _SEARCH_TOOLS.get(tool_name, hybrid_search)
+    logger.info(f"Using search tool: {tool_name}")
 
     query = state["original_query"]
-    results = semantic_search(
+    results = await search_fn(
         query=query,
         user_id=state["user_id"],
         domain=state["primary_domain"],
@@ -142,7 +163,7 @@ def retrieve_papers(state: RAGState) -> RAGState:
     avg = calculate_avg_relevance(results)
     logger.info(f"Initial retrieval: {len(results)} results, avg relevance={avg}")
 
-    # Reformulate if low relevance (max 2 times)
+    # Reformulate if low relevance (max 2 times) — always escalate to hybrid on retry
     if avg < 0.6 and state["reformulation_count"] < 2:
         llm = get_llm("retriever", state["llm_mode"])
         prompt = QUERY_REFORMULATE_PROMPT.format(
@@ -153,7 +174,8 @@ def retrieve_papers(state: RAGState) -> RAGState:
         new_query = call_llm(llm, prompt).strip()
         logger.info(f"Reformulated query: {new_query}")
 
-        results = semantic_search(
+        # Always use hybrid on retry for maximum recall
+        results = await hybrid_search(
             query=new_query,
             user_id=state["user_id"],
             domain=state["primary_domain"],
@@ -167,7 +189,8 @@ def retrieve_papers(state: RAGState) -> RAGState:
 
     state["retrieved_papers"] = results
     state["reasoning_trace"].append(
-        f"[Retriever] → {len(results)} papers retrieved, avg relevance={calculate_avg_relevance(results)}"
+        f"[Retriever] tool={tool_name} → {len(results)} papers retrieved, "
+        f"avg relevance={calculate_avg_relevance(results)}"
     )
     return state
 

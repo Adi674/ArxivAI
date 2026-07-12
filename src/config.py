@@ -41,6 +41,13 @@ class Settings(BaseSettings):
     OPENROUTER_API_KEY: str = ""
     GEMINI_API_KEY: str = ""
     ANTHROPIC_API_KEY: str = ""
+    AZURE_OPENAI_KEY: str = ""
+    AZURE_OPENAI_ENDPOINT: str = ""
+    AZURE_OPENAI_DEPLOYMENT_NAME: str = "text-embedding-3-small"
+    AWS_ACCESS_KEY_ID: str = ""
+    AWS_SECRET_ACCESS_KEY: str = ""
+    AWS_DEFAULT_REGION: str = "us-east-1"
+    AWS_API_KEY: str = ""
 
     # LLM defaults
     DEFAULT_LLM_MODE: str = "balanced"

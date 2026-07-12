@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 from typing import Optional
 from uuid import UUID
+from datetime import datetime
 
 from src.database import get_session
 from src.models import User
@@ -40,8 +41,8 @@ class ConversationOut(BaseModel):
     title: str
     domain: Optional[str]
     is_archived: bool
-    last_message_at: Optional[str]
-    created_at: str
+    last_message_at: Optional[datetime]
+    created_at: datetime
 
     class Config:
         from_attributes = True
@@ -54,7 +55,7 @@ class MessageOut(BaseModel):
     detected_domain: Optional[str]
     papers_referenced: list[str]
     quality_score: Optional[float]
-    created_at: str
+    created_at: datetime
 
     class Config:
         from_attributes = True

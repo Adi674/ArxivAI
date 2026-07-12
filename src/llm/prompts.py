@@ -34,25 +34,48 @@ Domain: {domain}
 Query Type: {query_type}
 Needs Recent Papers: {needs_recent}
 
-Decide:
-1. search_spaces: which namespaces to search (e.g. ["public", "user_private"])
-2. fetch_arxiv_fresh: true only if query needs very recent papers not in database
+Decide THREE things and respond ONLY with strict JSON:
 
-Respond ONLY with JSON:
-{{"search_spaces": ["public", "user_private"], "fetch_arxiv_fresh": false}}
+1. search_spaces: which namespaces to search
+2. fetch_arxiv_fresh: true only if query needs very recent papers not in database
+3. search_tool: which search tool to use — pick ONE of: "semantic", "keyword", "hybrid"
+
+SEARCH TOOL DECISION RULES:
+- "keyword"  → query mentions a SPECIFIC author name, paper title, arXiv ID (e.g. 2301.12345),
+               conference (NeurIPS, ICML, ICLR), or exact model name (GPT-4, LLaMA-2, BERT).
+               Use when the user is looking for a SPECIFIC known item.
+
+- "semantic" → query asks to EXPLAIN, DEFINE, or UNDERSTAND a concept with NO specific
+               named entities. Examples: "What is attention?", "How does dropout work?",
+               "Explain gradient descent". Use when intent is conceptual understanding.
+
+- "hybrid"   → query asks to COMPARE, CONTRAST, or asks HOW something performs in a
+               SPECIFIC real-world setting. Also use for multi-hop queries or when unsure.
+               Examples: "How does RLHF compare to SFT?", "What are the trade-offs of X?",
+               "How does SMetric balance LLM session serving?". DEFAULT when uncertain.
+
+Respond ONLY with this exact JSON format, no extra text:
+{{"search_spaces": ["public"], "fetch_arxiv_fresh": false, "search_tool": "hybrid"}}
 
 JSON:"""
 
 
-QUERY_REFORMULATE_PROMPT = """The original query returned poor search results. Rewrite it for better retrieval from a vector database of academic papers.
+QUERY_REFORMULATE_PROMPT = """You are a search query optimizer. The original search query returned poor search results. Rewrite it for better retrieval from a vector database.
 
 Original query: {query}
 Domain: {domain}
 Reason for reformulation: Low average relevance score ({score})
 
-Write a single improved query that is more specific, uses academic terminology, and will match relevant papers better.
+Task:
+Write a single optimized query that uses specific academic terminology, terms, or IDs to match relevant papers.
 
-Improved query:"""
+CRITICAL INSTRUCTIONS:
+1. Output ONLY the raw optimized query string itself.
+2. Do NOT output any intro or conversational filler (e.g. do NOT say "Here is the query:" or "Based on the original query...").
+3. Do NOT wrap the query in quotes or markdown code blocks.
+4. If an arXiv ID or author name is present in the original query, make sure to keep it in the optimized query.
+
+Optimized query:"""
 
 
 EXTRACT_FINDINGS_PROMPT = """You are a research analyst. Extract the key findings from the following paper excerpt.

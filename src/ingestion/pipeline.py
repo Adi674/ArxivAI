@@ -81,8 +81,8 @@ def chunk_text(
     text: str,
     paper_id: str,
     metadata: dict,
-    chunk_size: int = 500,
-    overlap: int = 50,
+    chunk_size: int = 1500,
+    overlap: int = 150,
 ) -> list[Document]:
     """
     Split text into chunks using LangChain RecursiveCharacterTextSplitter.
@@ -120,34 +120,52 @@ def chunk_text(
 
 async def ingest_paper(
     paper_id: str,
-    pdf_url: Optional[str],
-    pdf_bytes: Optional[bytes],
-    metadata: dict,
+    pdf_url: Optional[str] = None,
+    pdf_bytes: Optional[bytes] = None,
+    metadata: Optional[dict] = None,
+    db: Optional[any] = None,
 ) -> list[str]:
     """
-    Full pipeline: download (if needed) → extract → chunk → embed → store in Chroma.
+    Ingest a single paper: download, extract, chunk, embed, and store in Supabase pgvector.
 
     Args:
         paper_id: Unique paper identifier
         pdf_url: URL to download PDF from (if no bytes provided)
         pdf_bytes: Raw PDF bytes (if already downloaded)
         metadata: Dict with title, authors, domain, source, visibility, user_id etc.
+        db: Async database session
 
     Returns:
-        List of Chroma chunk IDs (store in papers.chroma_ids for future deletion).
+        List of generated chunk IDs.
     """
-    from src.vectordb.chroma_client import get_vectorstore, get_chroma_client
+    import uuid
+    from sqlalchemy import select
+    from src.models import Paper, PaperChunk
+    from src.vectordb.chroma_client import get_embedding_model
 
-    # Skip if paper is already ingested to prevent duplicate processing and download throttling
+    if db is None:
+        from src.database import get_async_session_maker
+        session_maker = get_async_session_maker()
+        async with session_maker() as session:
+            return await ingest_paper(
+                paper_id=paper_id,
+                pdf_url=pdf_url,
+                pdf_bytes=pdf_bytes,
+                metadata=metadata,
+                db=session
+            )
+
+    # Skip if paper is already ingested to prevent duplicate processing
     try:
-        client = get_chroma_client()
-        collection = client.get_collection("arxivai_papers")
-        existing = collection.get(where={"paper_id": paper_id}, limit=1)
-        if existing and existing.get("ids"):
-            logger.info(f"Paper {paper_id} is already in Chroma. Skipping ingestion.")
-            return existing["ids"]
-    except Exception:
-        pass
+        stmt = select(PaperChunk.id).where(PaperChunk.paper_id == paper_id).limit(1)
+        res = await db.execute(stmt)
+        if res.scalar():
+            logger.info(f"Paper {paper_id} is already in Supabase. Skipping ingestion.")
+            stmt_all = select(PaperChunk.id).where(PaperChunk.paper_id == paper_id)
+            res_all = await db.execute(stmt_all)
+            return [str(cid) for cid in res_all.scalars()]
+    except Exception as e:
+        logger.warning(f"Could not check existing chunks: {e}")
 
     # Step 1: Get PDF bytes
     if pdf_bytes is None and pdf_url:
@@ -163,29 +181,79 @@ async def ingest_paper(
         logger.error(f"Could not extract text from paper {paper_id}")
         return []
 
+    # Clean text to remove PostgreSQL invalid byte sequences (null characters and UTF-16 surrogates)
+    text = text.replace("\x00", "").replace("\u0000", "")
+    text = "".join(c for c in text if not (0xD800 <= ord(c) <= 0xDFFF))
+
     # Step 3: Chunk
     documents = chunk_text(text=text, paper_id=paper_id, metadata=metadata)
     if not documents:
         return []
 
-    # Step 4: Embed and store in Chroma
+    # Step 4: Embed and store in Supabase pgvector
     try:
-        vectorstore = get_vectorstore()
-
-        # Generate deterministic chunk IDs
-        chunk_ids = [
-            f"{paper_id}_chunk_{i}"
-            for i in range(len(documents))
-        ]
+        embeddings_model = get_embedding_model()
 
         texts = [doc.page_content for doc in documents]
-        metadatas = [doc.metadata for doc in documents]
+        embeddings = await embeddings_model.aembed_documents(texts)
 
-        vectorstore.add_texts(texts=texts, metadatas=metadatas, ids=chunk_ids)
+        # Check if parent Paper record exists
+        stmt_paper = select(Paper).where(Paper.id == paper_id)
+        res_paper = await db.execute(stmt_paper)
+        paper_record = res_paper.scalar_one_or_none()
 
-        logger.info(f"Stored {len(chunk_ids)} chunks in Chroma for paper {paper_id}")
+        if not paper_record:
+            user_uuid = None
+            if metadata.get("user_id") and metadata.get("user_id") != "public":
+                user_uuid = uuid.UUID(str(metadata.get("user_id")))
+                
+            paper_record = Paper(
+                id=paper_id,
+                user_id=user_uuid,
+                title=metadata.get("title", "Unknown Title"),
+                authors=metadata.get("authors", "Unknown Authors"),
+                domain=metadata.get("domain", "ML"),
+                source=metadata.get("source", "arxiv"),
+                visibility=metadata.get("visibility", "public"),
+                pdf_url=pdf_url or metadata.get("pdf_url")
+            )
+            db.add(paper_record)
+            await db.flush()
+
+        chunk_records = []
+        chunk_ids = []
+
+        for i, (text_content, emb) in enumerate(zip(texts, embeddings)):
+            chunk_uuid = uuid.uuid4()
+            chunk_ids.append(str(chunk_uuid))
+
+            user_id_str = None
+            if metadata.get("user_id") and metadata.get("user_id") != "public":
+                user_id_str = str(metadata.get("user_id"))
+
+            chunk_records.append(
+                PaperChunk(
+                    id=chunk_uuid,
+                    paper_id=paper_id,
+                    content=text_content,
+                    chunk_index=i,
+                    embedding=emb,
+                    user_id=user_id_str,
+                    visibility=metadata.get("visibility", "public"),
+                    domain=metadata.get("domain", "ML"),
+                    collaboration_id=str(metadata.get("collaboration_id")) if metadata.get("collaboration_id") else None
+                )
+            )
+
+        db.add_all(chunk_records)
+        paper_record.chroma_ids = chunk_ids
+        await db.commit()
+
+        logger.info(f"Stored {len(chunk_ids)} chunks in Supabase pgvector for paper {paper_id}")
         return chunk_ids
 
     except Exception as e:
-        logger.error(f"Chroma storage failed for paper {paper_id}: {e}")
+        logger.error(f"Supabase pgvector storage failed for paper {paper_id}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return []

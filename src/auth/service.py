@@ -232,30 +232,18 @@ async def login_user(
 
 
 from fastapi import Depends, Header, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from src.database import get_session
 
+security = HTTPBearer(auto_error=True)
+
 async def get_token_from_header(
-    authorization: str = Header(None)
+    credentials: HTTPAuthorizationCredentials = Depends(security)
 ) -> str:
     """
     Extract JWT token from Authorization header.
     """
-    if not authorization:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing Authorization header",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    parts = authorization.split()
-    if len(parts) != 2 or parts[0].lower() != "bearer":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid Authorization header format. Use: Bearer <token>",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    return parts[1]
+    return credentials.credentials
 
 
 # ── GET CURRENT USER ────────────────────────────────────────────────────

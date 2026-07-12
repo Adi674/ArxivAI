@@ -1,662 +1,362 @@
 # ArxivAI v2.0 — Project Status Tracker
 
-This file tracks every file, function, and feature in the project. Update after every working session. Paste into Claude at session start for full context. Format: ✅ Done | 🔄 In Progress | ⬜ Not Started | ❌ Blocked
+Paste this file into any AI assistant at session start for full context.
+Format: ✅ Done | 🔄 In Progress | ⬜ Not Started | ❌ Blocked | ⚠️ Changed from original plan
+
+**Last updated:** 2026-07-11
+**Current focus:** Search quality — hybrid search implementation
+**Sessions completed:** ~10+
+
+---
+
+## ⚠️ CRITICAL TECH STACK CHANGES (Original Plan vs. Actual)
+
+The original Claude project instructions are **outdated**. These are the actual decisions made during development:
+
+| Layer | Original Plan | **Actual Implementation** | Why Changed |
+|---|---|---|---|
+| Vector Database | Chroma (self-hosted) | **Supabase pgvector** | Chroma had persistent metadata filter crashes; Supabase gives managed DB + vector in one |
+| Embeddings | HuggingFace `all-MiniLM-L6-v2` | **AWS Bedrock `amazon.titan-embed-text-v2:0`** | Free, cloud-managed, no GPU needed, 512-dim Matryoshka support |
+| Vector Dimensions | 384 (MiniLM) | **512 (Titan V2 Matryoshka)** | Matches our pgvector column definition |
+| Models DB | PostgreSQL (separate) | **Supabase PostgreSQL** (same instance) | Single managed DB for both metadata and vectors |
+| File Storage | MinIO / AWS S3 | **Not yet implemented** | PDFs downloaded directly from arXiv URLs; user upload storage deferred |
+| Local LLMs | Ollama primary | **Groq API primary** (Ollama removed) | Student machine can't run 7B+ models; Groq free tier works well |
+| All models merged | Separate files per domain | **Single `src/models.py`** (all 13 tables) | Easier to manage relationships and migrations in one place |
+| All agents split | Separate files per agent | **Single `src/agents/nodes.py`** (all node functions) | Reduced import complexity; graph compiled in `graph.py` |
+| Chroma metadata filters | Chroma `where` filters | **SQL WHERE clauses in pgvector** | Native SQL access control is cleaner and more flexible |
 
 ---
 
 ## 📊 OVERALL PROGRESS
 
-Week 1 — Foundation          ░░░░░░░░░░  0%
-
-Week 2 — Domain Routing      ░░░░░░░░░░  0%
-
-Week 3 — Parallel Agents     ░░░░░░░░░░  0%
-
-Week 4 — User Features       ░░░░░░░░░░  0%
-
-**Last updated:** \[date\] **Current focus:** Week 1 — Foundation **Sessions completed:** 0
-
----
-
-## 🗂️ WEEK 1 — FOUNDATION
-
-### Project Setup
-
-| Status | Task |
-| :---- | :---- |
-| ⬜ | Create GitHub repository |
-| ✅ | Set up folder structure (`src/`, `tests/`, `scripts/`, `docker/`) |
-| ✅ | Create `requirements.txt` |
-| ⬜ | Create `.env.example` |
-| ✅ | Create `docker-compose.yml` (FastAPI \+ PostgreSQL \+ Chroma \+ Prometheus \+ Grafana) |
-| ✅ | Create `Dockerfile` |
-| ⬜ | Verify Ollama running locally with Mistral-7B |
+```
+Foundation & DB Setup        ████████████████████  100% ✅
+Embeddings & Ingestion       ████████████████████  100% ✅ (AWS Bedrock)
+Vector Search (Basic)        ████████████████████  100% ✅ (pgvector)
+LangGraph 7-Agent Pipeline   ████████████████░░░░   80% 🔄
+Hybrid Search (planned)      ░░░░░░░░░░░░░░░░░░░░    0% ⬜
+Auth & User System           ████████████████████  100% ✅
+Papers CRUD                  ████████░░░░░░░░░░░░   40% 🔄
+Collaboration System         ████░░░░░░░░░░░░░░░░   20% 🔄
+Monitoring (Prometheus)      ████████████████░░░░   80% ✅
+Tests                        ░░░░░░░░░░░░░░░░░░░░    0% ⬜
+Deployment (Docker)          ████████████████████  100% ✅ (local)
+AWS EC2 Production           ░░░░░░░░░░░░░░░░░░░░    0% ⬜
+```
 
 ---
 
-### `src/config.py`
+## 🗂️ FILE-BY-FILE STATUS
 
-| Status | Item |
-| :---- | :---- |
-| ✅ | **File created** |
+### Root Level
 
-**Functions / Variables:**
-
-| Status | Name | Type | Description |
-| :---- | :---- | :---- | :---- |
-| ✅ | `Settings` | Pydantic BaseSettings class | Loads all env vars. Fields: `DATABASE_URL`, `CHROMA_PATH`, `JWT_SECRET`, `JWT_EXPIRE_HOURS`, `OLLAMA_BASE_URL`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `S3_BUCKET`, `S3_ENDPOINT`, `ARXIV_CATEGORIES`, `DEFAULT_LLM_MODE` |
-| ✅ | `get_settings()` | function → Settings | Cached singleton. Returns the Settings instance. Called everywhere config is needed. |
-
----
-
-### `src/database.py`
-
-| Status | Item |
-| :---- | :---- |
-| ✅ | **File created** |
-
-**Functions:**
-
-| Status | Name | Params | Returns | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ✅ | `get_engine()` | none | `Engine` | Creates SQLAlchemy engine from `DATABASE_URL`. Called once at startup. |
-| ✅ | `get_session()` | none | `AsyncSession` | FastAPI dependency. Yields an async DB session. Used in all routers via `Depends(get_session)`. |
-| ✅ | `create_all_tables()` | none | none | Creates all tables from models. Called at app startup in `main.py`. |
+| Status | File | Notes |
+|:---|:---|:---|
+| ✅ | `.env` | All secrets loaded here — DB, Groq, AWS Bedrock, JWT |
+| ✅ | `requirements.txt` | Includes: fastapi, sqlalchemy, langchain, boto3, PyPDF2, langchain-google-genai (fallback), groq |
+| ✅ | `ARXIVAI_STATUS.md` | This file |
+| ⬜ | `.env.example` | Not yet created |
+| ⬜ | `README.md` | Not yet created |
 
 ---
 
-### `src/main.py`
+### `docker/`
 
-| Status | Item |
-| :---- | :---- |
-| ✅ | **File created** |
+| Status | File | Notes |
+|:---|:---|:---|
+| ✅ | `docker/Dockerfile` | Multi-stage build. Copies src, installs requirements |
+| ✅ | `docker/docker-compose.yaml` | Services: `arxivai-api`, `arxivai-nginx`, `prometheus`, `grafana` |
+| ✅ | `docker/prometheus.yml` | Scrapes `/metrics` on API container. Trailing slash fixed |
+| ✅ | `docker/nginx.conf` | Reverse proxy to FastAPI |
 
-**What it does:** FastAPI app entry point. Registers all routers, runs `create_all_tables()` on startup, mounts Prometheus metrics endpoint at `/metrics`, sets up CORS.
-
-**Routers registered:**
-
-| Status | Prefix | Module |
-| :---- | :---- | :---- |
-| ✅ | `/auth` | `src/auth/router.py` |
-| ✅ | `/papers` | `src/papers/router.py` |
-| ✅ | `/query` | `src/query/router.py` |
-| ✅ | `/collaboration` | `src/collaboration/router.py` |
-| ✅ | `/metrics` | Prometheus ASGI handler |
+**Running containers:** `arxivai-api`, `arxivai-nginx`, `arxivai-prometheus`, `arxivai-grafana`
+**API port:** 8000 (internal), exposed via Nginx
 
 ---
 
-### `src/auth/`
+### `src/config.py` ✅
 
-#### `src/auth/models.py`
+All env vars loaded via `pydantic_settings.BaseSettings`.
 
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
-
-**Models:**
-
-| Status | Model | Table | Fields | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ⬜ | `User` | `users` | `id (UUID PK)`, `email (unique)`, `hashed_password`, `full_name`, `domains (array)`, `organization`, `is_active`, `created_at` | Main user table. `domains` stores list of research domains user works in. |
-
----
-
-#### `src/auth/schemas.py`
-
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
-
-**Schemas:**
-
-| Status | Schema | Fields | Used For |
-| :---- | :---- | :---- | :---- |
-| ⬜ | `UserRegister` | `email`, `password`, `full_name`, `domains[]` | POST /auth/register request body |
-| ⬜ | `UserLogin` | `email`, `password` | POST /auth/login request body |
-| ⬜ | `UserOut` | `id`, `email`, `full_name`, `domains`, `created_at` | Response schema (no password) |
-| ⬜ | `TokenOut` | `access_token`, `token_type` | Login response |
+| Variable | Description |
+|:---|:---|
+| `DATABASE_URL` | Supabase PostgreSQL async connection string |
+| `JWT_SECRET_KEY` | JWT signing key |
+| `JWT_ALGORITHM` | HS256 |
+| `JWT_EXPIRE_HOURS` | Token expiry |
+| `GROQ_API_KEY` | Primary LLM provider |
+| `OPENROUTER_API_KEY` | Fallback LLM |
+| `GEMINI_API_KEY` | Fallback LLM |
+| `ANTHROPIC_API_KEY` | Premium fallback |
+| `AWS_ACCESS_KEY_ID` | Dummy value (bearer token auth bypasses this) |
+| `AWS_SECRET_ACCESS_KEY` | Dummy value |
+| `AWS_DEFAULT_REGION` | `us-east-1` |
+| `AWS_API_KEY` | AWS Bedrock Bearer Token (`ABSK...` prefix) — set as `AWS_BEARER_TOKEN_BEDROCK` in env |
 
 ---
 
-#### `src/auth/service.py`
+### `src/database.py` ✅
 
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
-
-**Functions:**
-
-| Status | Name | Params | Returns | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ⬜ | `hash_password()` | `password: str` | `str` | Hashes plain password using bcrypt. Returns hashed string. |
-| ⬜ | `verify_password()` | `plain: str`, `hashed: str` | `bool` | Compares plain password against stored hash. Returns True if match. |
-| ⬜ | `create_access_token()` | `user_id: str`, `expires_delta: timedelta` | `str` | Creates signed JWT token with user\_id in payload. Expiry from config. |
-| ⬜ | `decode_token()` | `token: str` | `dict` | Decodes JWT, validates signature, returns payload. Raises 401 if invalid/expired. |
-| ⬜ | `get_current_user()` | `token: str` (from header), `db: AsyncSession` | `User` | FastAPI dependency. Decodes token, fetches user from DB. Used in all protected routes. |
-| ⬜ | `register_user()` | `data: UserRegister`, `db: AsyncSession` | `User` | Checks email not taken, hashes password, creates User record, returns user. |
-| ⬜ | `login_user()` | `data: UserLogin`, `db: AsyncSession` | `TokenOut` | Verifies email \+ password, returns JWT token. Raises 401 if wrong credentials. |
+| Function | Status | Description |
+|:---|:---|:---|
+| `get_engine()` | ✅ | Async SQLAlchemy engine from `DATABASE_URL` |
+| `get_async_session_maker()` | ✅ | Returns session factory (used in ingestion and searcher) |
+| `get_session()` | ✅ | FastAPI `Depends()` — yields async session for routes |
+| `create_all_tables()` | ✅ | Called at startup in `main.py` |
 
 ---
 
-#### `src/auth/router.py`
+### `src/models.py` ✅ (Single consolidated file — all 13 tables)
 
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
+> ⚠️ **Changed from original plan:** All DB models are in ONE file, not split across `auth/models.py`, `papers/models.py`, etc.
 
-**Endpoints:**
-
-| Status | Method | Path | Auth | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ⬜ | POST | `/auth/register` | None | Register new user. Body: `UserRegister`. Returns `UserOut`. |
-| ⬜ | POST | `/auth/login` | None | Login. Body: `UserLogin`. Returns `TokenOut` with JWT. |
-| ⬜ | GET | `/auth/me` | JWT required | Returns current user profile (`UserOut`). |
-
----
-
-### `src/ingestion/`
-
-#### `src/ingestion/arxiv_fetcher.py`
-
-| Status | Item |
-| :---- | :---- |
-| ✅ | **File created** |
-
-**Functions:**
-
-| Status | Name | Params | Returns | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ✅ | `fetch_paper_metadata()` | `category: str`, `num_papers: int`, `date_from: str` | `list[dict]` | Calls arXiv API, parses XML response. Returns list of `{id, title, authors, summary, pdf_url, categories}` dicts. |
-| ✅ | `download_pdf()` | `paper_id: str`, `pdf_url: str`, `output_dir: str` | `str | None` | Downloads single PDF. Returns local file path on success, None on failure. Skips if already downloaded. |
-| ⬜ | `batch_download_pdfs()` | `papers: list[dict]`, `output_dir: str`, `max_workers: int` | `dict[str, str]` | Downloads all PDFs in parallel using ThreadPoolExecutor. Returns `{paper_id: file_path}` map. |
-| ✅ | `fetch_fresh_papers()` | `query: str`, `domain: str`, `k: int` | `list[dict]` | Called by Retriever agent when arXiv baseline is insufficient. Fetches k fresh papers matching query. Returns metadata list ready for ingestion. |
+| Status | Class | Table | Key Notes |
+|:---|:---|:---|:---|
+| ✅ | `User` | `users` | UUID PK, email unique, bcrypt password, domains array |
+| ✅ | `Paper` | `papers` | String PK (arXiv ID), `pdf_url` ✅ stored, `file_path` (S3 future), `chroma_ids` repurposed as chunk UUID list |
+| ✅ | `Collaboration` | `collaborations` | direct_invite / project types |
+| ✅ | `CollaborationMember` | `collaboration_members` | Many-to-many users ↔ collaborations |
+| ✅ | `CollaborationPaper` | `collaboration_papers` | Papers linked to collaborations |
+| ✅ | `CollaborationApplication` | `collaboration_applications` | Applications for project-type collabs |
+| ✅ | `Conversation` | `conversations` | Chat history per user |
+| ✅ | `Message` | `messages` | Individual messages, RAGAS scores stored per message |
+| ✅ | `ConversationContext` | `conversation_context` | Running context/memory per conversation |
+| ✅ | `SessionState` | `session_state` | Full LangGraph agent state snapshot per query (for debugging) |
+| ✅ | `ConversationSettings` | `conversation_settings` | Per-conversation user preferences |
+| ✅ | `UserMemory` | `user_memory` | Persistent preferences + patterns across sessions |
+| ✅ | `PGVector` | *(custom SQLAlchemy type)* | Custom `UserDefinedType` for `vector(512)` with `bind_processor` (list→string) and `result_processor` (string→list) |
+| ✅ | `PaperChunk` | `paper_chunks` | pgvector table. Stores `embedding vector(512)`, `content`, `chunk_index`, `domain`, `visibility`, `user_id`, `collaboration_id` |
 
 ---
 
-#### `src/ingestion/pdf_extractor.py`
+### `src/main.py` ✅
 
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
+Registers routers, calls `create_all_tables()` on startup, Prometheus middleware, CORS.
 
-**Functions:**
-
-| Status | Name | Params | Returns | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ⬜ | `extract_text_from_pdf()` | `pdf_path: str` | `str | None` | Uses PyPDF2 to extract raw text from PDF. Cleans whitespace. Returns text string or None if extraction fails. |
-| ⬜ | `extract_all_pdfs()` | `pdf_dir: str` | `dict[str, str]` | Extracts text from all PDFs in directory. Returns `{paper_id: extracted_text}`. Skips failed extractions with warning log. |
-
----
-
-#### `src/ingestion/chunker.py`
-
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
-
-**Functions:**
-
-| Status | Name | Params | Returns | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ⬜ | `chunk_text()` | `text: str`, `paper_id: str`, `metadata: dict` | `list[Document]` | Splits text using LangChain `RecursiveCharacterTextSplitter` (chunk\_size=500, overlap=50). Returns list of LangChain `Document` objects with metadata attached to each chunk. |
-| ⬜ | `chunk_all_papers()` | `papers_text: dict[str, str]`, `metadata_map: dict` | `list[Document]` | Chunks all papers. Returns flat list of all Document chunks across all papers. |
+| Router | Prefix | Status |
+|:---|:---|:---|
+| `auth/router.py` | `/auth` | ✅ |
+| `papers/router.py` | `/papers` | ✅ (partial) |
+| `query/router.py` | `/api/query` | ✅ |
+| `collaboration/router.py` | `/collaboration` | ✅ (partial) |
+| Prometheus | `/metrics` | ✅ |
 
 ---
 
-#### `src/ingestion/embedder.py`
+### `src/auth/` ✅ (fully working)
 
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
+> ⚠️ No `auth/models.py` — User model is in `src/models.py`
 
-**Functions:**
-
-| Status | Name | Params | Returns | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ⬜ | `get_embedding_model()` | none | `HuggingFaceEmbeddings` | Loads `all-MiniLM-L6-v2` from HuggingFace. Cached singleton — only loads once. |
-| ⬜ | `embed_and_store()` | `documents: list[Document]`, `vectorstore: Chroma` | `int` | Embeds list of Document chunks and adds to Chroma. Returns count of documents added. |
+| File | Status | Notes |
+|:---|:---|:---|
+| `auth/schemas.py` | ✅ | `UserRegister`, `UserLogin`, `UserOut`, `TokenOut` |
+| `auth/service.py` | ✅ | `hash_password`, `verify_password`, `create_access_token`, `decode_token`, `get_current_user`, `register_user`, `login_user` |
+| `auth/router.py` | ✅ | `POST /auth/register`, `POST /auth/login`, `GET /auth/me` |
 
 ---
 
-#### `src/ingestion/pipeline.py`
+### `src/ingestion/` ✅
 
-| Status | Item |
-| :---- | :---- |
-| ✅ | **File created** |
+> ⚠️ **Restructured from original plan.** `pdf_extractor.py`, `chunker.py`, `embedder.py` were **merged into `pipeline.py`**. No separate files for those.
 
-**Functions:**
+| File | Status | Notes |
+|:---|:---|:---|
+| `ingestion/arxiv_fetcher.py` | ✅ | `fetch_papers_for_domain()`, `fetch_fresh_papers()`. Returns metadata with `pdf_url`. Supports domain→arXiv category mapping (ML, NLP, CV, Systems, etc.) |
+| `ingestion/pipeline.py` | ✅ | Full pipeline: download PDF → extract text → sanitize (null bytes stripped) → **chunk (1500 chars, 150 overlap)** → embed via AWS Bedrock → store in Supabase pgvector + papers table. `pdf_url` now stored in `Paper` record. |
 
-| Status | Name | Params | Returns | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ✅ | `run_arxiv_ingestion()` | `category: str`, `num_papers: int` | `dict` | Full pipeline: fetch metadata → download PDFs → extract text → chunk → embed → store in Chroma. Returns `{total_papers, total_chunks, failed}` summary. |
-| ⬜ | `ingest_user_paper()` | `pdf_path: str`, `paper_metadata: dict`, `user_id: str` | `dict` | Ingests a single user-uploaded paper. Same pipeline as arXiv but with user metadata. Called as background task. Returns `{paper_id, chunks_created, status}`. |
-
----
-
-### `src/vectordb/`
-
-#### `src/vectordb/chroma_client.py`
-
-| Status | Item |
-| :---- | :---- |
-| ✅ | **File created** |
-
-**Functions:**
-
-| Status | Name | Params | Returns | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ✅ | `get_chroma_client()` | none | `chromadb.Client` | Creates persistent Chroma client at path from config. Cached singleton. |
-| ✅ | `get_vectorstore()` | none | `Chroma` | Returns LangChain Chroma wrapper with embedding model attached. Cached singleton. |
+**Key decisions in pipeline:**
+- `chunk_size=1500`, `chunk_overlap=150` — chosen for academic paper paragraph completeness (vs. original 500/50)
+- Null byte (`\x00`) sanitization added to fix PostgreSQL `CharacterNotInRepertoireError`
+- Skip logic: if `paper_id` already has chunks in DB, it is skipped (no re-ingestion)
+- `pdf_url` is now populated in `Paper` record on creation
 
 ---
 
-#### `src/vectordb/searcher.py`
+### `src/vectordb/` ✅
 
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
+> ⚠️ **Changed from original plan.** No Chroma at all. All vector storage is Supabase pgvector via raw SQL.
 
-**Functions:**
+| File | Status | Notes |
+|:---|:---|:---|
+| `vectordb/chroma_client.py` | ✅ ⚠️ | **Misnamed — actually creates AWS Bedrock embedding client (not Chroma)**. Contains `MatryoshkaBedrockEmbeddings` wrapper that calls Titan V2 and slices output to 512 dims. `get_embedding_model()` returns this. Should be renamed to `embeddings_client.py` |
+| `vectordb/searcher.py` | ✅ 🔄 | `semantic_search()` is async. Runs cosine distance query against `paper_chunks` in Supabase. `calculate_avg_relevance()` is sync. **Domain is NOT a hard SQL filter** (see decisions log). Upgrade to hybrid search planned. |
 
-| Status | Name | Params | Returns | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ⬜ | `build_access_filter()` | `user_id: str`, `domain: str`, `collab_ids: list[str]` | `dict` | Builds Chroma `where` filter. Allows: user's private papers \+ all public papers \+ collaborative papers user belongs to. All scoped to given domain. |
-| ⬜ | `semantic_search()` | `query: str`, `user_id: str`, `domain: str`, `k: int`, `collab_ids: list[str]` | `list[dict]` | Runs vector search with access filter. Returns list of `{paper_id, title, content, relevance_score, source, visibility}`. |
-| ⬜ | `search_private_only()` | `query: str`, `user_id: str`, `domain: str`, `k: int` | `list[dict]` | Searches only user's private papers. Used when query explicitly targets personal papers. |
-| ⬜ | `calculate_avg_relevance()` | `results: list[dict]` | `float` | Averages relevance scores across results. Retriever agent uses this to decide if reformulation is needed. |
-
----
-
-## 🗂️ WEEK 2 — DOMAIN ROUTING
-
-### `src/agents/state.py`
-
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
-
-**What it does:** Defines `RAGState` TypedDict — the single shared state object that all LangGraph agents read from and write to. Every field is documented below.
-
-| Status | Field | Type | Set By | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ⬜ | `original_query` | str | Query router | The raw user query |
-| ⬜ | `user_id` | str | Query router | ID of requesting user |
-| ⬜ | `collab_ids` | list\[str\] | Query router | Collaboration IDs user belongs to |
-| ⬜ | `llm_mode` | str | Query router | budget / balanced / quality / research |
-| ⬜ | `primary_domain` | str | Domain classifier | Detected domain |
-| ⬜ | `secondary_domains` | list\[str\] | Domain classifier | Secondary domains |
-| ⬜ | `domain_confidence` | float | Domain classifier | Confidence score 0-1 |
-| ⬜ | `query_type` | str | Query analyzer | single\_hop or multi\_hop |
-| ⬜ | `sub_queries` | list\[str\] | Query analyzer | Broken sub-queries if multi\_hop |
-| ⬜ | `needs_personal_papers` | bool | Query analyzer | True if query mentions own work |
-| ⬜ | `needs_recent` | bool | Query analyzer | True if query has recency signal |
-| ⬜ | `search_spaces` | list\[str\] | Search strategy | Which namespaces to search |
-| ⬜ | `fetch_arxiv_fresh` | bool | Search strategy | Whether to pre-fetch from arXiv |
-| ⬜ | `retrieved_papers` | list\[dict\] | Retriever | Papers retrieved with scores |
-| ⬜ | `reformulation_count` | int | Retriever | How many times query was reformulated |
-| ⬜ | `findings` | dict | Reasoner | Key findings per paper |
-| ⬜ | `contradictions` | list\[dict\] | Reasoner | Conflicting claims between papers |
-| ⬜ | `agreements` | list\[dict\] | Reasoner | Agreed-upon claims across papers |
-| ⬜ | `citation_graph` | dict | Reasoner | Maps claim → supporting papers |
-| ⬜ | `knowledge_gaps` | list\[str\] | Reasoner | What the papers don't cover |
-| ⬜ | `draft_answer` | str | Synthesis | Generated answer with citations |
-| ⬜ | `hallucination_detected` | bool | Evaluator | True if hallucination found |
-| ⬜ | `quality_score` | float | Evaluator | Overall RAGAS quality score |
-| ⬜ | `ragas_scores` | dict | Evaluator | All individual RAGAS metric scores |
-| ⬜ | `needs_refinement` | bool | Evaluator | True if quality \< 0.7 |
-| ⬜ | `refinement_count` | int | Evaluator | Loop counter — max 3 |
-| ⬜ | `evaluator_feedback` | str | Evaluator | Specific feedback sent to Synthesis |
-| ⬜ | `final_answer` | str | Format node | Cleaned final answer |
-| ⬜ | `sources` | list\[dict\] | Format node | Source papers list for response |
-| ⬜ | `reasoning_trace` | list\[str\] | Format node | Audit trail of agent decisions |
+**⚠️ Known limitation — planned fix: Hybrid Search**
+- Currently: pure semantic search, no domain filter at all
+- Planned: Two-lane hybrid search
+  - **Lane 1** (domain-filtered) → high precision results
+  - **Lane 2** (no filter, global) → high recall fallback
+  - **Merge**: deduplicate by `paper_id`, boost Lane 1 hits by +0.10 score, return top-k
+  - Both lanes run via `asyncio.gather()` — no added latency
 
 ---
 
-### `src/agents/domain_classifier.py`
+### `src/agents/` 🔄 (~80% working)
 
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
+> ⚠️ **Changed from original plan.** All 7 agent node functions are in `nodes.py` (not separate files per agent).
 
-**Functions:**
+| File | Status | Notes |
+|:---|:---|:---|
+| `agents/state.py` | ✅ | `RAGState` TypedDict with all fields |
+| `agents/graph.py` | ✅ | LangGraph `StateGraph` compiled. Sequential: classify_domain → analyze_query → decide_search_strategy → retrieve_papers → reason_over_papers → synthesize_answer → evaluate_answer → format_output |
+| `agents/nodes.py` | ✅ 🔄 | All 7 agent node functions in one file |
 
-| Status | Name | Params | Returns | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ⬜ | `classify_domain()` | `state: RAGState` | `RAGState` | LangGraph node. Sends query to Mistral-7B via `provider.py`. Parses LLM output into domain \+ confidence. Updates `primary_domain`, `secondary_domains`, `domain_confidence` in state. |
+**Node function status:**
 
----
-
-### `src/agents/query_analyzer.py`
-
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
-
-**Functions:**
-
-| Status | Name | Params | Returns | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ⬜ | `analyze_query()` | `state: RAGState` | `RAGState` | LangGraph node. Detects single vs multi-hop, personal paper mentions, recency signals. Generates sub-queries if multi-hop. Updates state fields accordingly. |
+| Function | Status | LLM Used | Notes |
+|:---|:---|:---|:---|
+| `classify_domain()` | ✅ | Groq llama-3.1-8b-instant | Works. Known issue: sometimes misclassifies Systems papers as NLP/ML |
+| `analyze_query()` | ✅ | Groq llama-3.1-8b-instant | Detects single_hop/multi_hop, personal, recent |
+| `decide_search_strategy()` | ✅ | Groq llama-3.1-8b-instant | Sets search_spaces and fetch_arxiv_fresh |
+| `retrieve_papers()` | ✅ | Groq llama-3.1-8b-instant (reformulation) | **`async def` + `await semantic_search()`** — fixed coroutine bug. Upgrade to hybrid_search planned |
+| `reason_over_papers()` | ✅ | Groq llama-3.3-70b-versatile | Extracts findings, contradictions, agreements, knowledge gaps |
+| `synthesize_answer()` | ✅ | Groq llama-3.3-70b-versatile | Generates answer with inline citations |
+| `evaluate_answer()` | ✅ | Groq llama-3.1-8b-instant | RAGAS-style evaluation. Returns quality_score, hallucination_detected |
+| `format_output()` | ✅ | — | Formats final response, deduplicates sources |
 
 ---
 
-### `src/agents/search_strategy.py`
+### `src/llm/` ✅
 
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
-
-**Functions:**
-
-| Status | Name | Params | Returns | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ⬜ | `decide_search_strategy()` | `state: RAGState` | `RAGState` | LangGraph node. Checks which namespaces exist for user in identified domain. Decides search\_spaces list and whether to pre-fetch arXiv. Updates state. |
+| File | Status | Notes |
+|:---|:---|:---|
+| `llm/provider.py` | ✅ | `get_llm(agent_name, mode)` — returns Groq/OpenRouter/Gemini. Fallback chain implemented. Per-agent model mapping. |
+| `llm/prompts.py` | ✅ | All prompt templates: `DOMAIN_CLASSIFY_PROMPT`, `QUERY_ANALYZE_PROMPT`, `SEARCH_STRATEGY_PROMPT`, `QUERY_REFORMULATE_PROMPT`, `EXTRACT_FINDINGS_PROMPT`, `SYNTHESIS_PROMPT`, `EVALUATE_PROMPT`, etc. |
 
 ---
 
-### `src/agents/retriever.py`
+### `src/query/` ✅
 
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
-
-**Functions:**
-
-| Status | Name | Params | Returns | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ⬜ | `retrieve_papers()` | `state: RAGState` | `RAGState` | LangGraph node. Searches each search\_space in parallel. Checks avg relevance. If \< 0.6 → calls reformulate. If still low → calls arxiv\_fetch. Updates `retrieved_papers` and `reformulation_count`. |
-| ⬜ | `reformulate_query()` | `original_query: str`, `domain: str` | `str` | Uses Neural-Chat-7B to rewrite query for better retrieval. Returns reformulated query string. |
+| File | Status | Notes |
+|:---|:---|:---|
+| `query/router.py` | ✅ | `POST /api/query/` — accepts query, runs LangGraph pipeline, returns response |
+| `query/service.py` | ✅ | `run_query()` — builds initial `RAGState`, calls `graph.ainvoke()`, returns final state |
 
 ---
 
-### `src/agents/reasoner.py`
+### `src/papers/` 🔄 (partial)
 
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
+> ⚠️ No `papers/models.py` — Paper model is in `src/models.py`
 
-**Functions:**
-
-| Status | Name | Params | Returns | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ⬜ | `reason_over_papers()` | `state: RAGState` | `RAGState` | LangGraph node. Runs all analysis tools on retrieved papers using Llama2-13B. Updates `findings`, `contradictions`, `agreements`, `citation_graph`, `knowledge_gaps`. |
+| File | Status | Notes |
+|:---|:---|:---|
+| `papers/schemas.py` | ✅ | `PaperUploadRequest`, `PaperOut`, `PaperVisibilityUpdate` |
+| `papers/service.py` | 🔄 | Basic CRUD exists. User upload → S3 flow not implemented yet |
+| `papers/router.py` | 🔄 | `/papers/upload`, `/papers/my-papers` endpoints exist but upload flow incomplete |
 
 ---
 
-### `src/agents/synthesis.py`
+### `src/collaboration/` 🔄 (partial)
 
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
+> ⚠️ No `collaboration/models.py` — all 4 collaboration models are in `src/models.py`
 
-**Functions:**
-
-| Status | Name | Params | Returns | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ⬜ | `synthesize_answer()` | `state: RAGState` | `RAGState` | LangGraph node. Generates answer using Reasoner's analysis. If `evaluator_feedback` present in state, uses it to refine. Updates `draft_answer`. |
+| File | Status | Notes |
+|:---|:---|:---|
+| `collaboration/schemas.py` | ✅ | Basic schemas present |
+| `collaboration/service.py` | 🔄 | `create_direct_invite`, `get_user_collaborations` implemented. Apply/approve flow partial |
+| `collaboration/router.py` | 🔄 | Basic endpoints present |
 
 ---
 
-### `src/agents/evaluator.py`
+### `scripts/`
 
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
-
-**Functions:**
-
-| Status | Name | Params | Returns | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ⬜ | `evaluate_answer()` | `state: RAGState` | `RAGState` | LangGraph node. Runs RAGAS checks on draft\_answer vs retrieved\_papers. Sets `quality_score`, `ragas_scores`, `hallucination_detected`, `needs_refinement`, `evaluator_feedback`. Increments `refinement_count`. |
-| ⬜ | `should_refine()` | `state: RAGState` | `str` | LangGraph conditional edge function. Returns `"synthesis"` if needs\_refinement and refinement\_count \< 3, else returns `"format_output"`. |
-
----
-
-### `src/agents/graph.py`
-
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
-
-**What it does:** Builds and compiles the LangGraph `StateGraph`. Registers all 7 agent nodes, defines edges between them (sequential for Phase 1, async parallel for Phase 2), and adds conditional edge from evaluator to either synthesis or format\_output.
-
-**Functions:**
-
-| Status | Name | Params | Returns | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ⬜ | `build_graph()` | none | `CompiledGraph` | Creates StateGraph(RAGState), adds all nodes, sets entry point to domain\_classifier, adds all edges and conditional edges, compiles and returns. Called once at app startup. |
-| ⬜ | `get_compiled_graph()` | none | `CompiledGraph` | Cached singleton. Returns compiled graph for use in query service. |
-
----
-
-### `src/llm/provider.py`
-
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
-
-**Functions:**
-
-| Status | Name | Params | Returns | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ⬜ | `get_llm()` | `agent_name: str`, `mode: str` | `BaseLLM` | Returns correct LLM instance for given agent and mode. Applies fallback chain: Ollama → Groq → OpenRouter → Gemini → Claude. Logs provider used to Prometheus. |
-| ⬜ | `call_llm()` | `llm: BaseLLM`, `prompt: str` | `str` | Wraps LLM call in try/except. On failure, tries next provider in fallback chain. Returns response string. |
-
----
-
-### `src/llm/prompts.py`
-
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
-
-**What it does:** All prompt templates as string constants. One template per agent task. Never write prompts inside agent files — always import from here.
-
-| Status | Constant | Used By |
-| :---- | :---- | :---- |
-| ⬜ | `DOMAIN_CLASSIFY_PROMPT` | domain\_classifier.py |
-| ⬜ | `QUERY_ANALYZE_PROMPT` | query\_analyzer.py |
-| ⬜ | `SEARCH_STRATEGY_PROMPT` | search\_strategy.py |
-| ⬜ | `QUERY_REFORMULATE_PROMPT` | retriever.py |
-| ⬜ | `EXTRACT_FINDINGS_PROMPT` | reasoner.py |
-| ⬜ | `CONTRADICTION_DETECT_PROMPT` | reasoner.py |
-| ⬜ | `CITATION_GRAPH_PROMPT` | reasoner.py |
-| ⬜ | `SYNTHESIS_PROMPT` | synthesis.py |
-| ⬜ | `SYNTHESIS_REFINE_PROMPT` | synthesis.py (when feedback present) |
-| ⬜ | `HALLUCINATION_CHECK_PROMPT` | evaluator.py |
-| ⬜ | `COMPLETENESS_CHECK_PROMPT` | evaluator.py |
-
----
-
-## 🗂️ WEEK 3 — PARALLEL AGENTS \+ EVALUATION
-
-### `src/monitoring/metrics.py`
-
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
-
-**What it does:** Defines all Prometheus Counter, Histogram, and Gauge objects. Every agent imports from here to log metrics. Never create metric objects inside agent files.
-
-| Status | Metric Name | Type | Labels | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ⬜ | `agent_execution_seconds` | Histogram | `agent_name` | Time each agent takes to run |
-| ⬜ | `query_type_total` | Counter | `type` | single\_hop vs multi\_hop count |
-| ⬜ | `reformulation_total` | Counter | none | How many times query was reformulated |
-| ⬜ | `arxiv_fetch_total` | Counter | `domain` | Fresh arXiv fetches per domain |
-| ⬜ | `ragas_faithfulness` | Histogram | none | Faithfulness scores distribution |
-| ⬜ | `ragas_citation_accuracy` | Histogram | none | Citation accuracy distribution |
-| ⬜ | `ragas_quality_score` | Histogram | none | Overall quality score distribution |
-| ⬜ | `hallucination_total` | Counter | none | Times hallucination was detected |
-| ⬜ | `refinement_loop_total` | Counter | none | Times answer was sent back to Synthesis |
-| ⬜ | `llm_provider_calls_total` | Counter | `provider`, `agent` | LLM provider usage per agent |
-| ⬜ | `paper_upload_total` | Counter | `visibility` | Paper uploads by visibility |
-| ⬜ | `collaboration_created_total` | Counter | `type` | direct\_invite vs project |
-
----
-
-## 🗂️ WEEK 4 — USER FEATURES
-
-### `src/papers/`
-
-#### `src/papers/models.py`
-
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
-
-| Status | Model | Table | Fields | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ⬜ | `Paper` | `papers` | `id (UUID PK)`, `user_id (FK → users)`, `title`, `authors`, `domain`, `source`, `visibility`, `chroma_ids (array)`, `file_path (S3 key)`, `upload_date`, `citation_count` | Metadata record for every paper. `chroma_ids` lists all Chroma chunk IDs so paper can be deleted from Chroma if needed. |
-
----
-
-#### `src/papers/schemas.py`
-
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
-
-| Status | Schema | Fields | Used For |
-| :---- | :---- | :---- | :---- |
-| ⬜ | `PaperUploadRequest` | `domain`, `visibility`, `title (optional)` | POST /papers/upload form data |
-| ⬜ | `PaperOut` | `id`, `title`, `domain`, `visibility`, `source`, `upload_date`, `citation_count` | Response schema |
-| ⬜ | `PaperVisibilityUpdate` | `visibility` | PATCH /papers/{id}/visibility |
-
----
-
-#### `src/papers/service.py`
-
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
-
-| Status | Name | Params | Returns | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ⬜ | `upload_paper()` | `file: UploadFile`, `metadata: PaperUploadRequest`, `user_id: str`, `db: AsyncSession` | `dict` | Saves PDF to S3. Creates Paper record in PostgreSQL. Triggers `ingest_user_paper()` as background task. Returns `{paper_id, status: "processing"}`. |
-| ⬜ | `get_user_papers()` | `user_id: str`, `db: AsyncSession` | `list[PaperOut]` | Returns all papers owned by user. |
-| ⬜ | `update_visibility()` | `paper_id: str`, `visibility: str`, `user_id: str`, `db: AsyncSession` | `PaperOut` | Changes visibility of paper. If setting to public: also updates Chroma metadata. Private → public is irreversible — raises error if user tries to reverse. |
-| ⬜ | `delete_paper()` | `paper_id: str`, `user_id: str`, `db: AsyncSession` | `dict` | Deletes paper from PostgreSQL \+ Chroma (using stored chroma\_ids) \+ S3. Raises 403 if not owner. Raises 400 if paper is public (immutable). |
-
----
-
-#### `src/papers/router.py`
-
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
-
-| Status | Method | Path | Auth | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ⬜ | POST | `/papers/upload` | JWT | Upload PDF. Form data: file \+ `PaperUploadRequest`. Returns `{paper_id, status}`. Processing happens async in background. |
-| ⬜ | GET | `/papers/my-papers` | JWT | List all papers owned by current user. |
-| ⬜ | PATCH | `/papers/{id}/visibility` | JWT | Change paper visibility. Body: `PaperVisibilityUpdate`. |
-| ⬜ | DELETE | `/papers/{id}` | JWT | Delete paper (owner only, not if public). |
-| ⬜ | GET | `/papers/status/{paper_id}` | JWT | Check if async upload processing is complete. Returns `{status: processing/ready/failed}`. |
-
----
-
-### `src/collaboration/`
-
-#### `src/collaboration/models.py`
-
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
-
-| Status | Model | Table | Fields | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ⬜ | `Collaboration` | `collaborations` | `id (UUID PK)`, `type (direct_invite/project)`, `creator_id (FK → users)`, `status (active/archived)`, `project_name`, `description`, `domains (array)`, `open_roles (array)`, `created_at` | Main collaboration record. |
-| ⬜ | `CollaborationMember` | `collaboration_members` | `id (UUID PK)`, `collaboration_id (FK)`, `user_id (FK → users)`, `joined_at` | Many-to-many: collaborations → users. |
-| ⬜ | `CollaborationPaper` | `collaboration_papers` | `id (UUID PK)`, `collaboration_id (FK)`, `paper_id (FK → papers)`, `added_by (FK → users)`, `added_at` | Papers linked to a collaboration. |
-| ⬜ | `CollaborationApplication` | `collaboration_applications` | `id (UUID PK)`, `collaboration_id (FK)`, `user_id (FK → users)`, `status (pending/approved/rejected)`, `interest_note`, `applied_at` | Applications for project-type collaborations. |
-
----
-
-#### `src/collaboration/service.py`
-
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
-
-| Status | Name | Params | Returns | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ⬜ | `create_direct_invite()` | `creator_id: str`, `paper_id: str`, `db: AsyncSession` | `dict` | Creates Collaboration (type=direct\_invite), links paper, generates invite token. Returns `{collaboration_id, invite_link}`. |
-| ⬜ | `accept_invite()` | `invite_token: str`, `user_id: str`, `db: AsyncSession` | `dict` | Validates token, creates pending application, notifies creator. Returns `{status: pending}`. |
-| ⬜ | `approve_member()` | `collaboration_id: str`, `applicant_id: str`, `approver_id: str`, `db: AsyncSession` | `dict` | Creator approves member. Adds to CollaborationMember. Updates paper visibility to collaborative in Chroma. |
-| ⬜ | `create_project_ad()` | `creator_id: str`, `data: ProjectAdRequest`, `db: AsyncSession` | `dict` | Creates Collaboration (type=project) with ad details. Returns collaboration record. |
-| ⬜ | `apply_to_project()` | `collaboration_id: str`, `user_id: str`, `interest_note: str`, `db: AsyncSession` | `dict` | Creates CollaborationApplication (status=pending). Notifies project creator. |
-| ⬜ | `get_user_collaborations()` | `user_id: str`, `db: AsyncSession` | `list` | Returns all collaborations user is a member of. |
-| ⬜ | `get_open_projects()` | `domain: str | None`, `db: AsyncSession` | `list` | Returns all public project ads. Optional domain filter. |
-
----
-
-### `src/query/`
-
-#### `src/query/router.py`
-
-| Status | Item |
-| :---- | :---- |
-| ⬜ | **File created** |
-
-| Status | Method | Path | Auth | Description |
-| :---- | :---- | :---- | :---- | :---- |
-| ⬜ | POST | `/query` | JWT | Submit query. Body: `{query, llm_mode, domain_hint (optional)}`. Returns full response: answer \+ sources \+ reasoning\_trace. |
-| ⬜ | POST | `/query/{query_id}/evaluate` | JWT | On-demand RAGAS evaluation. Returns full RAGAS scores for a previous query. |
-| ⬜ | GET | `/query/history` | JWT | Returns user's past queries and answers (paginated). |
+| Status | File | Notes |
+|:---|:---|:---|
+| ✅ | `scripts/run_ingestion.py` | CLI tool: `python run_ingestion.py --domain Systems --num 5`. Calls pipeline for multiple domains. Prints ingestion summary. |
+| ✅ | `scripts/ingestion.log` | Log output from ingestion runs |
+| ⬜ | `scripts/seed_domains.py` | Not yet created |
 
 ---
 
 ## 🧪 TESTS
 
-| Status | File | What It Tests |
-| :---- | :---- | :---- |
-| ⬜ | `tests/test_auth.py` | Register, login, token validation, invalid credentials |
-| ⬜ | `tests/test_ingestion.py` | arXiv fetch, PDF extraction, chunking, embedding, Chroma storage |
-| ⬜ | `tests/test_search.py` | Semantic search, metadata filters, access control (private papers not visible to others) |
-| ⬜ | `tests/test_agents.py` | Each agent node with mock state, full graph run with sample query |
-| ⬜ | `tests/test_collaboration.py` | Invite flow, project ad \+ application flow, permission checks |
-| ⬜ | `tests/test_papers.py` | Upload, visibility change, delete, S3 interaction |
+| Status | File | Notes |
+|:---|:---|:---|
+| ⬜ | `tests/test_auth.py` | Not started |
+| ⬜ | `tests/test_ingestion.py` | Not started |
+| ⬜ | `tests/test_search.py` | Manual test done via API, no automated test yet |
+| ⬜ | `tests/test_agents.py` | Not started |
+| ⬜ | `tests/test_papers.py` | Not started |
 
 ---
 
-## 🐳 DEPLOYMENT
+## 🔄 PLANNED NEXT WORK (Priority Order)
 
-| Status | Task |
-| :---- | :---- |
-| ⬜ | `Dockerfile` — multi-stage build for FastAPI app |
-| ⬜ | `docker-compose.yml` — FastAPI \+ PostgreSQL \+ Chroma \+ Prometheus \+ Grafana \+ MinIO |
-| ⬜ | `.env.example` — all required env vars documented |
-| ⬜ | AWS EC2 instance setup (Ubuntu 24, t3.large) |
-| ⬜ | Ollama installed on EC2 with models pulled |
-| ⬜ | PostgreSQL RDS or EC2 PostgreSQL setup |
-| ⬜ | S3 bucket created with correct IAM permissions |
-| ⬜ | GitHub Actions CI/CD pipeline (test → build → deploy) |
-| ⬜ | Domain \+ SSL (Nginx reverse proxy \+ Certbot) |
-| ⬜ | Grafana dashboard imported and connected to Prometheus |
+### 1. Hybrid Search — Two-Lane Strategy (Next Immediate Task)
+
+Replace the current single `semantic_search()` call with a two-lane parallel search:
+
+```
+Lane 1: domain-filtered SQL search   → high precision (may be 0 if domain mismatch)
+Lane 2: global semantic search        → high recall (always returns results)
+
+Merge strategy:
+  - Deduplicate by paper_id
+  - Lane 1 results get +0.10 relevance score boost
+  - Sort by boosted score DESC
+  - Return top-k after re-ranking
+```
+
+Both lanes run via `asyncio.gather()` — no added latency since they run in parallel.
+
+**Files to edit:**
+- `src/vectordb/searcher.py` — add `hybrid_search()` function
+- `src/agents/nodes.py` — call `hybrid_search()` instead of `semantic_search()` in `retrieve_papers()`
+
+### 2. Rename `chroma_client.py`
+The file is now purely an AWS Bedrock embedding client. Should be renamed to `embeddings_client.py`.
+
+### 3. User Paper Upload Flow
+- Upload PDF → save to local volume (S3 later) → trigger ingestion pipeline as background task
+- Needs `papers/service.py` completion
+
+### 4. Domain Classifier Accuracy
+- Systems papers classified as NLP/ML/CV — prompts need domain-specific examples
+- Low priority since hybrid search will make domain misclassification less harmful
 
 ---
 
 ## 📝 SESSION LOG
 
-Add a row after every working session.
-
-| Date | Session \# | What was done | Files created/modified | Next task |
-| :---- | :---- | :---- | :---- | :---- |
-| 2026-07-07 | 1 | Set up host DB proxy for Supabase, fixed Chroma list metadata validation crash, implemented paper duplication skip checks for ingestion resumption, configured unbuffered logs, added custom HTTP requests metrics middleware in FastAPI, force-recreated Prometheus container with correct scrape trailing slash, added custom keyword query filtering for new GenAI domain. | `src/ingestion/pipeline.py`, `src/ingestion/arxiv_fetcher.py`, `src/main.py`, `docker/prometheus.yml`, `scripts/inspect_chroma.py`, `scripts/local_db_proxy.py` | Complete remaining domains ingestion & monitor health. |
+| Date | Session # | What was done | Files changed |
+|:---|:---|:---|:---|
+| 2026-07-07 | 1 | Initial setup, Supabase connection, arXiv fetcher, Chroma crash debugging | `pipeline.py`, `arxiv_fetcher.py`, `main.py`, `prometheus.yml` |
+| 2026-07-07–09 | 2–4 | Migrated Chroma → Supabase pgvector. Built `PGVector` custom SQLAlchemy type with `bind_processor`/`result_processor`. | `models.py`, `chroma_client.py`, `searcher.py` |
+| 2026-07-09–10 | 5–7 | Migrated embeddings HuggingFace/Gemini → AWS Bedrock Titan V2. Added `MatryoshkaBedrockEmbeddings` (512 dim). Boto3 bearer token auth (ABSK key). | `chroma_client.py`, `requirements.txt`, `config.py` |
+| 2026-07-10 | 8 | Fixed SQLAlchemy `::vector` cast syntax → `CAST()`. Fixed null byte crash in PDF extraction. Verified full ingestion of 5 papers. | `searcher.py`, `pipeline.py` |
+| 2026-07-11 | 9 | chunk_size 500→1500, overlap 50→150. Added `pdf_url` to papers table. Fixed `retrieve_papers` async bug. Removed hard domain filter from SQL. Discussed hybrid search plan. Updated this status doc. | `pipeline.py`, `nodes.py`, `searcher.py`, `ARXIVAI_STATUS.md` |
 
 ---
 
-## 🔖 NOTES & DECISIONS
-
-Track important decisions made during development.
+## 🔖 KEY DECISIONS LOG
 
 | Date | Decision | Reason |
-| :---- | :---- | :---- |
-| — | Single Chroma DB with metadata filters (not per-user DB) | Cost constraint, 225k docs is well within single instance limits |
-| — | Binary permissions only (private/public) in MVP | Simpler to build, granular permissions in v2 |
-| — | RAGAS on-demand only (not every query) | Cost and latency — Prometheus handles internal monitoring |
-| — | arXiv fresh fetch instead of web search | Controlled quality, papers stay in Chroma for future use |
-| — | Async paper upload processing | UX — user doesn't wait 2 minutes for upload to complete |
-| — | All prompts in `src/llm/prompts.py` | Single place to tune prompts without touching agent logic |
+|:---|:---|:---|
+| 2026-07-07 | Supabase pgvector instead of Chroma | Chroma had persistent metadata crashes; Supabase managed DB is simpler |
+| 2026-07-07 | Single `src/models.py` for all 13 tables | Easier to manage FK relationships, avoids circular imports |
+| 2026-07-09 | AWS Bedrock Titan V2 for embeddings | Free cloud model, no GPU needed, 512-dim Matryoshka, bearer token auth works on student account |
+| 2026-07-09 | Groq as primary LLM (not Ollama) | Student machine cannot run 7B+ models locally; Groq free tier is sufficient |
+| 2026-07-10 | chunk_size=1500, overlap=150 | 500-char chunks fragment academic paragraphs. 1500 chars ≈ 1 full paragraph → better retrieval. 5 papers = ~275 rows vs 800 rows |
+| 2026-07-10 | `pdf_url` stored in `papers` table | Was missing from `Paper` record creation; needed for frontend display |
+| 2026-07-10 | Domain NOT used as hard SQL filter | Domain classifier misclassifies often (Systems → NLP). Hard filter returns 0 results. Vector similarity is the real relevance signal |
+| 2026-07-11 | Hybrid search: two-lane parallel | Restore domain as a soft signal/boost without making it a hard gate |
+| — | RAGAS on-demand only | Cost and latency — Prometheus handles continuous monitoring |
+| — | All agent nodes in single `nodes.py` | Reduced import complexity, easier to trace the full pipeline |
+
+---
+
+## 🚫 WHAT NOT TO DO
+
+- Do NOT use SQLite — always Supabase PostgreSQL
+- Do NOT use Chroma — we migrated fully to pgvector
+- Do NOT call OpenAI API — use Groq/OpenRouter/Gemini in that order
+- Do NOT use `::vector` or `::uuid` cast syntax in SQLAlchemy `text()` — use `CAST(:param AS vector)` instead
+- Do NOT store PDFs in PostgreSQL — S3/local volume only
+- Do NOT run RAGAS on every query — on-demand only
+- Do NOT put auth logic in routers — it goes in `auth/service.py`
+- Do NOT hardcode API keys anywhere — always `.env` + `config.py`
+- Do NOT skip docstrings or type hints
+- Do NOT use `def` for functions that call async DB or embedding functions — always `async def` + `await`
+- Do NOT use domain as a hard SQL WHERE filter in vector search — use it as a soft boost only (hybrid search)
+- Do NOT store null bytes (`\x00`) in text fields — strip them from PDF-extracted text before storing
 

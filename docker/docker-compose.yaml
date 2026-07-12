@@ -103,7 +103,6 @@ services:
     env_file:
       - ../.env
     environment:
-      DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: redis://redis:6379/0
       CHROMA_HOST: chroma
       CHROMA_PORT: 8000
@@ -113,6 +112,7 @@ services:
     volumes:
       - ../src:/app/src
       - ../scripts:/app/scripts
+      - ../data:/app/data
     ports:
       - "8000:8000"
     depends_on:

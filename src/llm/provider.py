@@ -7,13 +7,13 @@ settings = get_settings()
 
 # Agent → model hint (used by providers that support model selection)
 AGENT_MODELS = {
-    "domain_classifier": "llama3-8b-8192",
-    "query_analyzer":    "llama3-8b-8192",
-    "search_strategy":   "llama3-8b-8192",
-    "retriever":         "llama3-8b-8192",
-    "reasoner":          "llama3-70b-8192",
-    "synthesis":         "llama3-70b-8192",
-    "evaluator":         "llama3-8b-8192",
+    "domain_classifier": "llama-3.1-8b-instant",
+    "query_analyzer":    "llama-3.1-8b-instant",
+    "search_strategy":   "llama-3.1-8b-instant",
+    "retriever":         "llama-3.1-8b-instant",
+    "reasoner":          "llama-3.3-70b-versatile",
+    "synthesis":         "llama-3.3-70b-versatile",
+    "evaluator":         "llama-3.1-8b-instant",
 }
 
 # mode → provider preference order (no Ollama, no Anthropic)
@@ -40,7 +40,7 @@ def get_llm(agent_name: str, mode: str = "balanced"):
     Raises:
         RuntimeError: If all providers fail (no API keys set)
     """
-    model_name = AGENT_MODELS.get(agent_name, "llama3-8b-8192")
+    model_name = AGENT_MODELS.get(agent_name, "llama-3.1-8b-instant")
     providers = MODE_PROVIDERS.get(mode, ["groq", "openrouter"])
 
     for provider in providers:

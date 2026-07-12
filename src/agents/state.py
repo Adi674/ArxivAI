@@ -22,6 +22,7 @@ class RAGState(TypedDict):
     # ── Agent 3: Search Strategy ───────────────────────────
     search_spaces: list[str]
     fetch_arxiv_fresh: bool
+    search_tool: str               # semantic | keyword | hybrid
 
     # ── Agent 4: Retriever ─────────────────────────────────
     retrieved_papers: list[dict]

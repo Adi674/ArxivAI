@@ -1,98 +1,13 @@
 import logging
+import asyncio
+import re
 from typing import Optional
-from uuid import UUID
+from sqlalchemy import text
 
-from src.vectordb.chroma_client import get_vectorstore
+from src.database import get_async_session_maker
+from src.vectordb.chroma_client import get_embedding_model
 
 logger = logging.getLogger(__name__)
-
-
-def build_access_filter(
-    user_id: str,
-    domain: Optional[str] = None,
-    collab_ids: Optional[list[str]] = None,
-) -> dict:
-    """
-    Build Chroma metadata filter for access control.
-    A user can see:
-      - Their own private papers
-      - All public papers
-      - Collaborative papers they belong to
-
-    Args:
-        user_id: Current user's UUID as string
-        domain: Optional domain to filter by
-        collab_ids: List of collaboration IDs the user belongs to
-
-    Returns:
-        Chroma `where` filter dict.
-    """
-    visibility_conditions = [
-        {"visibility": {"$eq": "public"}},
-        {"user_id": {"$eq": user_id}},
-    ]
-
-    if collab_ids:
-        visibility_conditions.append(
-            {"collaboration_id": {"$in": collab_ids}}
-        )
-
-    access_filter = {"$or": visibility_conditions}
-
-    if domain:
-        return {
-            "$and": [
-                {"domain": {"$eq": domain}},
-                access_filter,
-            ]
-        }
-
-    return access_filter
-
-
-def semantic_search(
-    query: str,
-    user_id: str,
-    domain: Optional[str] = None,
-    k: int = 10,
-    collab_ids: Optional[list[str]] = None,
-) -> list[dict]:
-    """
-    Run semantic similarity search in Chroma with access control.
-
-    Returns:
-        List of dicts with paper_id, content, relevance_score, metadata.
-    """
-    vectorstore = get_vectorstore()
-    where_filter = build_access_filter(user_id=user_id, domain=domain, collab_ids=collab_ids)
-
-    try:
-        results = vectorstore.similarity_search_with_relevance_scores(
-            query=query,
-            k=k,
-            filter=where_filter,
-        )
-
-        formatted = []
-        for doc, score in results:
-            formatted.append({
-                "paper_id": doc.metadata.get("paper_id"),
-                "title": doc.metadata.get("title", ""),
-                "authors": doc.metadata.get("authors", ""),
-                "domain": doc.metadata.get("domain", ""),
-                "content": doc.page_content,
-                "relevance_score": round(score, 4),
-                "source": doc.metadata.get("source", ""),
-                "visibility": doc.metadata.get("visibility", ""),
-                "chunk_index": doc.metadata.get("chunk_index", 0),
-            })
-
-        logger.info(f"Semantic search returned {len(formatted)} results for query: '{query[:60]}...'")
-        return formatted
-
-    except Exception as e:
-        logger.error(f"Semantic search failed: {e}")
-        return []
 
 
 def calculate_avg_relevance(results: list[dict]) -> float:
@@ -103,3 +18,409 @@ def calculate_avg_relevance(results: list[dict]) -> float:
     if not results:
         return 0.0
     return round(sum(r["relevance_score"] for r in results) / len(results), 4)
+
+
+async def semantic_search(
+    query: str,
+    user_id: str,
+    domain: Optional[str] = None,
+    k: int = 10,
+    collab_ids: Optional[list[str]] = None,
+) -> list[dict]:
+    """
+    Pure vector similarity search using AWS Bedrock Titan V2 embeddings.
+    Best for: conceptual questions, "what is X", "explain Y".
+
+    Args:
+        query: The search query string.
+        user_id: The requesting user's ID (for access control).
+        domain: Optional domain hint (NOT used as hard filter).
+        k: Number of results to return.
+        collab_ids: List of collaboration IDs the user belongs to.
+
+    Returns:
+        List of dicts with paper_id, title, content, relevance_score, etc.
+    """
+    try:
+        embeddings_model = get_embedding_model()
+        query_vector = await embeddings_model.aembed_query(query)
+        query_vector_str = f"[{','.join(map(str, query_vector))}]"
+
+        access_clause = "p.visibility = 'public' OR p.user_id = CAST(:user_id AS uuid)"
+        params = {
+            "user_id": str(user_id),
+            "query_embedding": query_vector_str,
+            "limit": k,
+        }
+
+        if collab_ids and len(collab_ids) > 0:
+            collab_tuples = tuple(str(cid) for cid in collab_ids)
+            access_clause += (
+                " OR (p.visibility = 'collaborative' AND p.id IN "
+                "(SELECT paper_id FROM collaboration_papers WHERE collaboration_id IN :collab_ids))"
+            )
+            params["collab_ids"] = collab_tuples
+
+        query_str = f"""
+            SELECT pc.paper_id, pc.content, pc.chunk_index,
+                   (pc.embedding <=> CAST(:query_embedding AS vector)) AS distance,
+                   p.title, p.authors, p.domain, p.source, p.visibility, p.pdf_url
+            FROM paper_chunks pc
+            JOIN papers p ON pc.paper_id = p.id
+            WHERE p.deleted_at IS NULL
+              AND ({access_clause})
+            ORDER BY distance ASC
+            LIMIT :limit
+        """
+
+        session_maker = get_async_session_maker()
+        formatted = []
+
+        async with session_maker() as db:
+            result = await db.execute(text(query_str), params)
+            rows = result.all()
+
+        for row in rows:
+            distance = float(row.distance)
+            relevance_score = max(0.0, min(1.0, 1.0 - distance))
+            formatted.append({
+                "paper_id": row.paper_id,
+                "title": row.title,
+                "authors": row.authors,
+                "domain": row.domain,
+                "content": row.content,
+                "relevance_score": round(relevance_score, 4),
+                "source": row.source,
+                "visibility": row.visibility,
+                "pdf_url": getattr(row, "pdf_url", None),
+                "chunk_index": row.chunk_index,
+                "search_lane": "semantic",
+            })
+
+        logger.info(f"[semantic_search] {len(formatted)} results for: '{query[:60]}...'")
+        return formatted
+
+    except Exception as e:
+        logger.error(f"semantic_search failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return []
+
+
+# Filler words that users type but that aren't actual searchable entities
+_FILLER_WORDS = {
+    "paper", "find", "search", "show", "get", "look", "fetch", "retrieve",
+    "me", "the", "a", "an", "for", "about", "on", "by", "from", "with",
+    "give", "please", "want", "need", "what", "which", "tell", "id", "arxiv",
+}
+
+
+def _extract_keywords(query: str) -> dict:
+    """
+    Extract specific searchable entities from a raw user query.
+
+    Extracts:
+    - arXiv IDs (e.g. 2607.08651, arxiv:2301.12345)
+    - 4-digit years (e.g. 2023, 2024)
+    - Capitalized proper names (author names, model names, conference names)
+    - Remaining non-filler tokens as keyword terms
+
+    Returns a dict with:
+        'arxiv_ids': list of arXiv ID strings
+        'terms': list of cleaned keyword strings
+        'ilike_patterns': list of (column, value) patterns to search
+    """
+    # Step 1: Extract arXiv IDs (e.g. "2607.08651" or "arxiv:2607.08651")
+    arxiv_pattern = re.compile(r'(?:arxiv[:\s]*)?(\d{4}\.\d{4,5})', re.IGNORECASE)
+    arxiv_ids = arxiv_pattern.findall(query)
+
+    # Step 2: Extract 4-digit years
+    year_pattern = re.compile(r'\b(20\d{2}|19\d{2})\b')
+    years = year_pattern.findall(query)
+
+    # Step 3: Strip filler words and collect remaining meaningful tokens
+    # Keep: capitalized words (proper nouns), technical acronyms, long words
+    clean_tokens = []
+    for token in re.split(r'[\s,;]+', query):
+        token = token.strip('()[]{}"\'.?!')
+        if not token:
+            continue
+        if token.lower() in _FILLER_WORDS:
+            continue
+        if re.match(r'^\d{4}\.\d{4,5}$', token):  # already captured arXiv ID
+            continue
+        if len(token) >= 3:  # ignore very short tokens
+            clean_tokens.append(token)
+
+    return {
+        "arxiv_ids": arxiv_ids,
+        "years": years,
+        "terms": clean_tokens,
+    }
+
+
+async def keyword_search(
+    query: str,
+    user_id: str,
+    domain: Optional[str] = None,
+    k: int = 10,
+    collab_ids: Optional[list[str]] = None,
+) -> list[dict]:
+    """
+    Full-text keyword search using PostgreSQL tsvector + ILIKE fallback.
+
+    Extracts specific searchable entities (arXiv IDs, author names, model names)
+    from the raw query before searching — prevents filler words like 'paper' or
+    'find' from polluting the ILIKE patterns.
+
+    Searches across: chunk content, paper title, authors, and paper_id (p.id).
+
+    Two-pronged approach:
+      1. tsvector full-text match on content + title + authors (for natural language terms)
+      2. ILIKE fallback on paper_id, title, authors for exact entity matches
+
+    Args:
+        query: The raw user query (e.g. "paper 2607.08651" or "papers by Vaswani").
+        user_id: The requesting user's ID (for access control).
+        domain: Optional domain hint (NOT used as hard filter).
+        k: Number of results to return.
+        collab_ids: List of collaboration IDs the user belongs to.
+
+    Returns:
+        List of dicts with paper_id, title, content, relevance_score, etc.
+    """
+    try:
+        # Extract specific searchable entities from the query
+        extracted = _extract_keywords(query)
+        arxiv_ids = extracted["arxiv_ids"]
+        terms = extracted["terms"]
+
+        logger.info(f"[keyword_search] Extracted → arxiv_ids={arxiv_ids}, terms={terms}")
+
+        access_clause = "p.visibility = 'public' OR p.user_id = CAST(:user_id AS uuid)"
+        params: dict = {
+            "user_id": str(user_id),
+            "query": query,                       # for tsvector full-text
+            "query_like": f"%{query}%",           # broad fallback on full query
+            "limit": k,
+        }
+
+        if collab_ids and len(collab_ids) > 0:
+            collab_tuples = tuple(str(cid) for cid in collab_ids)
+            access_clause += (
+                " OR (p.visibility = 'collaborative' AND p.id IN "
+                "(SELECT paper_id FROM collaboration_papers WHERE collaboration_id IN :collab_ids))"
+            )
+            params["collab_ids"] = collab_tuples
+
+        # Build ILIKE conditions for extracted entities and build CASE branches dynamically
+        ilike_conditions = []
+        rank_branches = []
+
+        # arXiv IDs → search p.id directly (exact match without filler words)
+        for i, arxiv_id in enumerate(arxiv_ids):
+            param_key = f"arxiv_id_{i}"
+            params[param_key] = f"%{arxiv_id}%"
+            ilike_conditions.append(f"p.id ILIKE :{param_key}")
+            rank_branches.append(f"WHEN p.id ILIKE :{param_key} THEN 1.0")
+
+        # Meaningful terms → search title and authors
+        for i, term in enumerate(terms[:5]):  # limit to first 5 terms
+            param_key = f"term_{i}"
+            params[param_key] = f"%{term}%"
+            ilike_conditions.append(f"p.title ILIKE :{param_key}")
+            ilike_conditions.append(f"p.authors ILIKE :{param_key}")
+            rank_branches.append(f"WHEN p.title ILIKE :{param_key} THEN 0.8")
+            rank_branches.append(f"WHEN p.authors ILIKE :{param_key} THEN 0.7")
+
+        # Always include broad fallback on the full query text
+        ilike_conditions.append("p.id ILIKE :query_like")
+        ilike_conditions.append("p.title ILIKE :query_like")
+        rank_branches.append("WHEN p.id ILIKE :query_like THEN 1.0")
+        rank_branches.append("WHEN p.title ILIKE :query_like THEN 0.8")
+
+        ilike_clause = " OR ".join(ilike_conditions)
+        rank_case_branches = "\n                            ".join(rank_branches)
+
+        query_str = f"""
+            SELECT DISTINCT ON (pc.paper_id, pc.chunk_index)
+                   pc.paper_id, pc.content, pc.chunk_index,
+                   GREATEST(
+                       COALESCE(
+                           ts_rank(
+                               to_tsvector('english',
+                                   COALESCE(pc.content, '') || ' ' ||
+                                   COALESCE(p.title, '') || ' ' ||
+                                   COALESCE(p.authors, '')
+                               ),
+                               websearch_to_tsquery('english', :query)
+                           ), 0
+                       ),
+                       CASE
+                           {rank_case_branches}
+                           ELSE 0.0
+                       END
+                   ) AS rank,
+                   p.title, p.authors, p.domain, p.source, p.visibility, p.pdf_url
+            FROM paper_chunks pc
+            JOIN papers p ON pc.paper_id = p.id
+            WHERE p.deleted_at IS NULL
+              AND ({access_clause})
+              AND (
+                  -- Full-text tsvector match
+                  to_tsvector('english',
+                      COALESCE(pc.content, '') || ' ' ||
+                      COALESCE(p.title, '') || ' ' ||
+                      COALESCE(p.authors, '')
+                  ) @@ websearch_to_tsquery('english', :query)
+                  OR
+                  -- Extracted entity ILIKE matches (arXiv IDs, author names, etc.)
+                  ({ilike_clause})
+              )
+            ORDER BY pc.paper_id, pc.chunk_index, rank DESC
+            LIMIT :limit
+        """
+
+        session_maker = get_async_session_maker()
+        formatted = []
+
+        async with session_maker() as db:
+            result = await db.execute(text(query_str), params)
+            rows = result.all()
+
+        for row in rows:
+            formatted.append({
+                "paper_id": row.paper_id,
+                "title": row.title,
+                "authors": row.authors,
+                "domain": row.domain,
+                "content": row.content,
+                "relevance_score": round(min(float(row.rank), 1.0), 4),
+                "source": row.source,
+                "visibility": row.visibility,
+                "pdf_url": getattr(row, "pdf_url", None),
+                "chunk_index": row.chunk_index,
+                "search_lane": "keyword",
+            })
+
+        formatted.sort(key=lambda x: x["relevance_score"], reverse=True)
+        logger.info(f"[keyword_search] {len(formatted)} results for: '{query[:60]}...'")
+        return formatted
+
+    except Exception as e:
+        logger.error(f"keyword_search failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return []
+
+
+
+async def hybrid_search(
+    query: str,
+    user_id: str,
+    domain: Optional[str] = None,
+    k: int = 10,
+    collab_ids: Optional[list[str]] = None,
+) -> list[dict]:
+    """
+    Two-lane hybrid search: runs semantic + keyword in parallel, merges and re-ranks.
+
+    Lane 1 (semantic): vector cosine similarity — high recall on meaning
+    Lane 2 (keyword):  full-text tsvector match — high precision on exact terms
+
+    Merge strategy:
+      - Deduplicate by paper_id + chunk_index
+      - Results that appear in BOTH lanes get a +0.15 boost to relevance_score
+      - Results only from keyword lane get +0.05 boost (exact term match is valuable)
+      - Sort by final score DESC, return top-k
+
+    Best for: comparisons, multi-hop, specific systems in context (e.g. "how does SMetric work").
+
+    Args:
+        query: The search query string.
+        user_id: The requesting user's ID (for access control).
+        domain: Optional domain hint (passed to both lanes but not used as hard filter).
+        k: Number of results to return.
+        collab_ids: List of collaboration IDs the user belongs to.
+
+    Returns:
+        List of dicts with paper_id, title, content, relevance_score, search_lane, etc.
+    """
+    try:
+        # Run both lanes in parallel — no extra latency
+        semantic_results, keyword_results = await asyncio.gather(
+            semantic_search(query, user_id, domain, k, collab_ids),
+            keyword_search(query, user_id, domain, k, collab_ids),
+        )
+
+        # Build a deduplicated map keyed by (paper_id, chunk_index)
+        merged: dict[tuple, dict] = {}
+
+        for result in semantic_results:
+            key = (result["paper_id"], result["chunk_index"])
+            merged[key] = {
+                **result,
+                "in_semantic": True,
+                "in_keyword": False,
+                "semantic_score": result["relevance_score"],
+                "keyword_score": 0.0
+            }
+
+        for result in keyword_results:
+            key = (result["paper_id"], result["chunk_index"])
+            if key in merged:
+                # Appears in BOTH lanes
+                merged[key]["in_keyword"] = True
+                merged[key]["keyword_score"] = result["relevance_score"]
+            else:
+                merged[key] = {
+                    **result,
+                    "in_semantic": False,
+                    "in_keyword": True,
+                    "semantic_score": 0.0,
+                    "keyword_score": result["relevance_score"]
+                }
+
+        # Apply score boosts based on lane coverage
+        final: list[dict] = []
+        for item in merged.values():
+            # Base score is the maximum of both lanes
+            base_score = max(item["semantic_score"], item["keyword_score"])
+            
+            if item["in_semantic"] and item["in_keyword"]:
+                score = min(1.0, base_score + 0.15)   # both lanes → highest confidence
+                item["search_lane"] = "hybrid_both"
+            elif item["in_keyword"]:
+                score = min(1.0, base_score + 0.05)   # keyword only → small boost for exact match
+                item["search_lane"] = "hybrid_keyword"
+            else:
+                score = base_score                     # semantic only → no boost
+                item["search_lane"] = "hybrid_semantic"
+
+            item["relevance_score"] = round(score, 4)
+            # Remove temporary score tracking fields
+            item.pop("semantic_score", None)
+            item.pop("keyword_score", None)
+            final.append(item)
+
+        # Sort by final score and return top-k
+        final.sort(key=lambda x: x["relevance_score"], reverse=True)
+        final = final[:k]
+
+        # Clean up internal tracking flags before returning
+        for item in final:
+            item.pop("in_semantic", None)
+            item.pop("in_keyword", None)
+
+        logger.info(
+            f"[hybrid_search] {len(final)} results "
+            f"(semantic={len(semantic_results)}, keyword={len(keyword_results)}) "
+            f"for: '{query[:60]}...'"
+        )
+        return final
+
+    except Exception as e:
+        logger.error(f"hybrid_search failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return []
