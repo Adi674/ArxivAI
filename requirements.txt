@@ -1,3 +1,4 @@
+protobuf<5.0.0
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 python-multipart==0.0.6
@@ -26,3 +27,33 @@ pytest==7.4.3
 pytest-asyncio==0.23.1
 email-validator
 boto3==1.43.45
+
+# ── Phase 1: Hybrid Search — BM25 + Cross-Encoder Reranker ───────────────────
+rank-bm25>=0.2.2
+sentence-transformers>=2.6.0
+
+# ── Phase 2: NLI Hallucination Detection ──────────────────────────────────────
+# sentence-transformers already covers NLI cross-encoder models
+
+# ── Phase 4: Guardrails — PII Detection ───────────────────────────────────────
+presidio-analyzer>=2.2.0
+presidio-anonymizer>=2.2.0
+spacy>=3.7.0
+
+# ── Phase 8: LLM Reliability ──────────────────────────────────────────────────
+pybreaker>=1.0.1
+structlog>=24.1.0
+
+# ── Phase 9: Distributed Tracing ─────────────────────────────────────────────
+opentelemetry-api==1.23.0
+opentelemetry-sdk==1.23.0
+opentelemetry-proto==1.23.0
+opentelemetry-instrumentation-fastapi==0.44b0
+opentelemetry-exporter-otlp==1.23.0
+
+# ── Phase 10: Async Ingestion ─────────────────────────────────────────────────
+celery>=5.3.6
+redis[hiredis]>=5.0.0
+
+# ── Phase 16: Neo4j GraphRAG (future — install only when starting Phase 16) ───
+# neo4j>=5.0.0

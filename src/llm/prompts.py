@@ -187,3 +187,40 @@ Respond ONLY with JSON:
 {{"faithfulness": 0.9, "completeness": 0.8, "relevance": 0.9, "citation_accuracy": 0.85, "overall": 0.86, "feedback": "Missing discussion of X"}}
 
 JSON:"""
+
+RELEVANCE_LABEL_PROMPT = """You are an information retrieval judge.
+Determine if the following academic paper chunk is highly relevant to the user query.
+
+Relevance criteria:
+- The chunk contains info that directly answers the query or part of the query.
+- The chunk provides essential background theory or details required for the answer.
+- Tangential or generic mentions of terms are NOT relevant.
+
+Query: {query}
+
+Paper: {title} by {authors}
+Chunk Content:
+{content}
+
+Respond ONLY with JSON:
+{{"relevant": true}} or {{"relevant": false}}
+
+JSON:"""
+
+
+RELEVANCE_JUDGE_PROMPT = """You are an information retrieval judge.
+Given a user query and up to 5 retrieved paper chunks, determine which chunks are highly relevant to answering the query.
+
+Relevance Criteria:
+- A chunk is relevant if it contains information that directly answers the query, supports the answer, or provides necessary background theory.
+- Generic mentions of terms or tangential info are NOT relevant.
+
+Query: {query}
+
+Retrieved Chunks:
+{chunks}
+
+Respond ONLY with JSON containing a list of relevant chunk indexes (0-indexed matching the list below):
+{{"relevant_indexes": [0, 2]}}
+
+JSON:"""

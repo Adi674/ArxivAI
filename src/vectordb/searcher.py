@@ -424,3 +424,230 @@ async def hybrid_search(
         import traceback
         logger.error(traceback.format_exc())
         return []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HYBRID SEARCH V2 — BM25 + Semantic + RRF + Cross-Encoder Reranking
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _rrf_merge(
+    semantic_results: list[dict],
+    bm25_results: list[dict],
+    rrf_k: int = 60,
+    expand_to: int = 40,
+) -> list[dict]:
+    """
+    Reciprocal Rank Fusion merge of semantic + BM25 ranked lists.
+
+    Formula: RRF_score(doc) = Σ 1 / (rrf_k + rank_i)
+    where rank_i is the 1-based position in each ranked list.
+    Standard rrf_k=60 is the empirically best constant for dense+sparse fusion.
+
+    Deduplication key: (paper_id, chunk_index) — same chunk from both lanes
+    is merged into a single entry with combined RRF score.
+
+    Returns up to `expand_to` docs sorted by RRF score descending.
+    These are then fed into the cross-encoder for final reranking.
+    """
+    rrf_scores: dict[tuple, float] = {}
+    doc_map: dict[tuple, dict] = {}
+
+    # Score semantic results (rank starts at 1)
+    for rank, doc in enumerate(semantic_results, start=1):
+        key = (doc["paper_id"], doc["chunk_index"])
+        rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (rrf_k + rank)
+        if key not in doc_map:
+            doc_map[key] = {**doc, "in_semantic": True, "in_bm25": False}
+
+    # Score BM25 results
+    for rank, doc in enumerate(bm25_results, start=1):
+        key = (doc["paper_id"], doc["chunk_index"])
+        rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (rrf_k + rank)
+        if key in doc_map:
+            doc_map[key]["in_bm25"] = True
+        else:
+            doc_map[key] = {**doc, "in_semantic": False, "in_bm25": True}
+
+    # Attach RRF score and determine search lane label
+    merged: list[dict] = []
+    for key, doc in doc_map.items():
+        doc["rrf_score"] = round(rrf_scores[key], 8)
+        if doc.get("in_semantic") and doc.get("in_bm25"):
+            doc["search_lane"] = "hybrid_both"
+        elif doc.get("in_bm25"):
+            doc["search_lane"] = "hybrid_bm25"
+        else:
+            doc["search_lane"] = "hybrid_semantic"
+        merged.append(doc)
+
+    # Sort by RRF score descending and return top expand_to candidates
+    merged.sort(key=lambda d: d["rrf_score"], reverse=True)
+    return merged[:expand_to]
+
+
+async def hybrid_search_v2(
+    query: str,
+    user_id: str,
+    domain: Optional[str] = None,
+    k: int = 5,
+    collab_ids: Optional[list[str]] = None,
+    semantic_k: int = 20,
+    bm25_k: int = 20,
+    rrf_expand: int = 40,
+) -> tuple[list[dict], dict]:
+    """
+    3-stage hybrid retrieval: Semantic + BM25 → RRF merge → Cross-encoder rerank.
+
+    Stage 1 — Dual retrieval (parallel):
+      • Lane A: semantic_search(k=semantic_k)  — pgvector cosine similarity
+      • Lane B: bm25_search(k=bm25_k)          — in-memory BM25Okapi
+
+    Stage 2 — RRF merge:
+      • Reciprocal Rank Fusion merges both ranked lists
+      • Deduplicates by (paper_id, chunk_index)
+      • Returns top rrf_expand candidates for reranking
+
+    Stage 3 — Cross-encoder rerank:
+      • cross-encoder/ms-marco-MiniLM-L-6-v2 scores each (query, passage) pair
+      • Returns final top-k with rerank_score and updated relevance_score
+
+    Args:
+        query:        User search query.
+        user_id:      Requesting user's UUID (access control).
+        domain:       Optional domain hint (passed through, not hard-filtered).
+        k:            Final number of results to return after reranking.
+        collab_ids:   Collaboration IDs for access control.
+        semantic_k:   How many results to pull from semantic search.
+        bm25_k:       How many results to pull from BM25.
+        rrf_expand:   How many merged candidates to pass to the cross-encoder.
+
+    Returns:
+        Tuple of:
+          - list[dict]: Top-k reranked results with fields:
+              paper_id, title, authors, domain, content, chunk_index,
+              relevance_score (normalised 0–1 from reranker),
+              rerank_score (raw cross-encoder logit),
+              rrf_score, search_lane, source, visibility, pdf_url
+          - dict: Retrieval signal metadata for RAGState:
+              semantic_count, bm25_count, rrf_candidates,
+              max_rerank_score, min_rerank_score, both_lanes_count
+    """
+    from src.vectordb import bm25_index  # local import to avoid circular at module load
+    from src.vectordb import reranker as reranker_module
+    import time
+
+    start_all = time.time()
+    try:
+        # ── Stage 1: Dual retrieval in parallel ──────────────────────────────
+        # Ensure BM25 index is built (no-op if already built)
+        start_bm25_build = time.time()
+        if not bm25_index.is_built():
+            await bm25_index.build()
+        bm25_build_elapsed = time.time() - start_bm25_build
+
+        # Run semantic search and in-memory BM25 search concurrently
+        start_retrieval = time.time()
+        loop = asyncio.get_event_loop()
+        
+        semantic_task = semantic_search(query, user_id, domain, semantic_k, collab_ids)
+        bm25_task = loop.run_in_executor(
+            None,
+            bm25_index.search,
+            query,
+            bm25_k
+        )
+        
+        semantic_results, bm25_results = await asyncio.gather(semantic_task, bm25_task)
+        retrieval_elapsed = time.time() - start_retrieval
+        
+        # Individual timers for backward logging metrics compatibility
+        semantic_elapsed = retrieval_elapsed
+        bm25_search_elapsed = retrieval_elapsed
+
+        logger.info(
+            f"[hybrid_v2] Stage 1: semantic={len(semantic_results)}, "
+            f"bm25={len(bm25_results)} for '{query[:60]}'"
+        )
+
+        # ── Stage 2: RRF merge ───────────────────────────────────────────────
+        start_rrf = time.time()
+        rrf_candidates = _rrf_merge(
+            semantic_results, bm25_results, rrf_k=60, expand_to=rrf_expand
+        )
+
+        both_lanes_count = sum(
+            1 for d in rrf_candidates if d.get("search_lane") == "hybrid_both"
+        )
+        rrf_elapsed = time.time() - start_rrf
+        logger.info(
+            f"[hybrid_v2] Stage 2 RRF: {len(rrf_candidates)} candidates "
+            f"({both_lanes_count} in both lanes)"
+        )
+
+        # ── Stage 3: Cross-encoder rerank ────────────────────────────────────
+        start_rerank = time.time()
+        # Offload CPU-heavy cross-encoder to thread executor to prevent freezing ASGI main thread
+        reranked = await loop.run_in_executor(
+            None,
+            reranker_module.rerank,
+            query,
+            rrf_candidates,
+            k
+        )
+        rerank_elapsed = time.time() - start_rerank== "hybrid_both"
+        
+        rrf_elapsed = time.time() - start_rrf
+        logger.info(
+            f"[hybrid_v2] Stage 2 RRF: {len(rrf_candidates)} candidates "
+            f"({both_lanes_count} in both lanes)"
+        )
+
+        # ── Stage 3: Cross-encoder rerank ────────────────────────────────────
+        start_rerank = time.time()
+        reranked = reranker_module.rerank(
+            query=query,
+            docs=rrf_candidates,
+            top_k=k,
+        )
+        rerank_elapsed = time.time() - start_rerank
+
+        # Build retrieval signal metadata for RAGState tracking
+        signals: dict = {
+            "semantic_count": len(semantic_results),
+            "bm25_count": len(bm25_results),
+            "rrf_candidates": len(rrf_candidates),
+            "both_lanes_count": both_lanes_count,
+            "max_rerank_score": reranked[0]["rerank_score"] if reranked else 0.0,
+            "min_rerank_score": reranked[-1]["rerank_score"] if reranked else 0.0,
+        }
+
+        # Clean up internal tracking fields from final results
+        for doc in reranked:
+            doc.pop("in_semantic", None)
+            doc.pop("in_bm25", None)
+
+        total_elapsed = time.time() - start_all
+        logger.info(
+            f"[hybrid_v2 TIMERS] Total: {total_elapsed:.4f}s | "
+            f"BM25 Build: {bm25_build_elapsed:.4f}s | "
+            f"Semantic: {semantic_elapsed:.4f}s | "
+            f"BM25 Search: {bm25_search_elapsed:.4f}s | "
+            f"RRF Merge: {rrf_elapsed:.4f}s | "
+            f"Reranker: {rerank_elapsed:.4f}s"
+        )
+        return reranked, signals
+
+    except Exception as e:
+        logger.error(f"hybrid_search_v2 failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        # Graceful fallback to original hybrid_search
+        logger.warning("[hybrid_v2] Falling back to basic hybrid_search.")
+        fallback = await hybrid_search(query, user_id, domain, k, collab_ids)
+        fallback_signals: dict = {
+            "semantic_count": 0, "bm25_count": 0,
+            "rrf_candidates": 0, "both_lanes_count": 0,
+            "max_rerank_score": calculate_avg_relevance(fallback),
+            "min_rerank_score": 0.0,
+        }
+        return fallback, fallback_signals

@@ -2,3 +2,5 @@
 /venv
 ingestion.log
 __pycache__
+data/hf_cache
+chroma_data

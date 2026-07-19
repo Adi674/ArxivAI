@@ -1,5 +1,5 @@
 """
-FastAPI application entry point for ArxivAI v2.0
+FastAPI application entry point for ArxivAI v3.0
 """
 
 from fastapi import FastAPI
@@ -23,16 +23,42 @@ async def lifespan(app: FastAPI):
     App lifecycle manager: startup and shutdown events.
     """
     # Startup
-    logger.info("🚀 Starting ArxivAI v2.0")
+    logger.info("🚀 Starting ArxivAI v3.0")
     logger.info(f"Environment: {settings.APP_ENV}")
     logger.info(f"Debug mode: {settings.DEBUG}")
-    
+
     # Create database tables
     await create_all_tables()
     logger.info("✅ Database initialized")
-    
+
+    # Build in-memory BM25 index from paper_chunks (Phase 1)
+    try:
+        from src.vectordb import bm25_index
+        await bm25_index.build()
+        logger.info("✅ BM25 index built")
+    except Exception as e:
+        # Non-fatal: hybrid_search_v2 will attempt a lazy build on first query
+        logger.warning(f"⚠️  BM25 index startup build failed (will retry on first query): {e}")
+
+    # Pre-warm cross-encoder reranker (Phase 1 — prevents cold-start on first query)
+    try:
+        from src.vectordb.reranker import _get_model as _warm_reranker
+        import asyncio
+        await asyncio.get_event_loop().run_in_executor(None, _warm_reranker)
+        logger.info("✅ Cross-encoder reranker pre-warmed")
+    except Exception as e:
+        logger.warning(f"⚠️  Reranker pre-warm failed (will load on first query): {e}")
+
+    # Pre-warm NLI hallucination model (Phase 2 — prevents cold-start on first query)
+    try:
+        from src.eval.hallucination import _get_nli_model as _warm_nli
+        await asyncio.get_event_loop().run_in_executor(None, _warm_nli)
+        logger.info("✅ NLI hallucination model pre-warmed")
+    except Exception as e:
+        logger.warning(f"⚠️  NLI model pre-warm failed (will load on first query): {e}")
+
     yield
-    
+
     # Shutdown
     logger.info("🛑 Shutting down ArxivAI")
     await close_db()
@@ -138,11 +164,15 @@ from src.auth.router import router as auth_router
 from src.papers.router import router as papers_router
 from src.collaboration.router import router as collab_router
 from src.query.router import router as query_router
+from src.eval.feedback import router as feedback_router
+# Ensure custom Prometheus metrics are initialized and registered at startup
+import src.eval.prometheus_metrics
 
 app.include_router(auth_router)
 app.include_router(papers_router)
 app.include_router(collab_router)
 app.include_router(query_router)
+app.include_router(feedback_router)
 
 
 # ─────────────────────────────────────────────────────────────

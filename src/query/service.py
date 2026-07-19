@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agents.graph import get_compiled_graph
 from src.agents.state import RAGState
-from src.models import Conversation, Message, ConversationContext, SessionState
+from src.models import Conversation, Message, ConversationContext, SessionState, DBModelEvalResult
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +86,19 @@ async def run_query(
         "final_answer": "",
         "sources": [],
         "reasoning_trace": [],
+        # Safety & Guardrails (Phase 4)
+        "guardrail_allowed": True,
+        "guardrail_reason": "",
+        "cleaned_query": query,
+        "guardrail_risk_score": 0.0,
+        "pii_found": False,
+        "pipeline_short_circuited": False,
+        "output_guardrail_clean": "",
+        "citation_verify_passed": True,
+        "invalid_citations_found": [],
+        # Intent Classifier (Phase 5)
+        "intent": "research",
+        "is_conversational": False,
     }
 
     # 3. Run pipeline
@@ -133,6 +146,21 @@ async def run_query(
         completed_at=datetime.utcnow(),
     )
     db.add(session)
+
+    # 5b. Trigger evaluation asynchronously in the background so it doesn't block the user response
+    import asyncio
+    asyncio.create_task(
+        _evaluate_background_task(
+            message_id=assistant_msg.id,
+            query=query,
+            answer=final_state["final_answer"],
+            retrieved_papers=final_state["retrieved_papers"],
+        )
+    )
+
+    if final_state.get("arxiv_fallback_triggered"):
+        from src.eval.prometheus_metrics import ARXIV_FALLBACK_TOTAL
+        ARXIV_FALLBACK_TOTAL.inc()
 
     # 6. Update conversation context
     from sqlalchemy import select
@@ -252,3 +280,106 @@ async def get_user_conversations(
         .order_by(Conversation.updated_at.desc())
     )
     return result.scalars().all()
+
+
+async def _evaluate_background_task(
+    message_id: uuid.UUID,
+    query: str,
+    answer: str,
+    retrieved_papers: list[dict],
+):
+    import time
+    from src.database import get_async_session_maker
+    from src.eval import llm_judge, hallucination as nli_module
+    from src.models import Message, DBModelEvalResult
+    from groq import Groq
+    from src.config import get_settings
+    import asyncio
+
+    logger.info(f"[BackgroundEval] Starting async evaluation for message {message_id}")
+    start_time = time.time()
+    
+    settings = get_settings()
+    if not settings.GROQ_API_KEY:
+        logger.warning("[BackgroundEval] GROQ_API_KEY not set. Skipping background evaluation.")
+        return
+
+    groq_client = Groq(api_key=settings.GROQ_API_KEY)
+
+    try:
+        # 1. Run LLM judge + NLI check in parallel
+        judge_task = llm_judge.evaluate(
+            query=query,
+            answer=answer,
+            retrieved_papers=retrieved_papers,
+            groq_client=groq_client,
+        )
+        nli_task = asyncio.get_event_loop().run_in_executor(
+            None,
+            nli_module.check_hallucination,
+            answer,
+            retrieved_papers,
+        )
+
+        eval_result, nli_result = await asyncio.gather(judge_task, nli_task, return_exceptions=True)
+
+        if isinstance(eval_result, Exception):
+            logger.error(f"[BackgroundEval] LLM judge failed: {eval_result}")
+            from src.eval.metrics import EvalResult
+            eval_result = EvalResult()
+            eval_result.overall_score = 0.5
+        
+        if isinstance(nli_result, Exception):
+            logger.error(f"[BackgroundEval] NLI check failed: {nli_result}")
+            nli_result = {"hallucination_rate": 0.0, "unsupported_claims": [], "attribution_map": {}}
+
+        # 2. Merge NLI
+        eval_result.hallucination_rate = nli_result.get("hallucination_rate", 0.0)
+        eval_result.unsupported_claims = nli_result.get("unsupported_claims", [])
+        eval_result.attribution_map = nli_result.get("attribution_map", {})
+        eval_result.compute_overall()
+
+        eval_scores = eval_result.to_dict()
+        latency_ms = int((time.time() - start_time) * 1000)
+        eval_scores["eval_latency_ms"] = latency_ms
+
+        # 3. Save to database
+        session_maker = get_async_session_maker()
+        async with session_maker() as db_session:
+            from sqlalchemy import select
+            msg_stmt = select(Message).where(Message.id == message_id)
+            msg_result = await db_session.execute(msg_stmt)
+            message = msg_result.scalar_one_or_none()
+            
+            if message:
+                message.quality_score = eval_result.overall_score
+                message.ragas_scores = eval_scores
+                
+                db_eval = DBModelEvalResult(
+                    message_id=message_id,
+                    query=query,
+                    answer=answer,
+                    faithfulness=float(eval_scores.get("faithfulness", 0.0)),
+                    answer_relevancy=float(eval_scores.get("answer_relevancy", 0.0)),
+                    context_recall=float(eval_scores.get("context_recall", 0.0)),
+                    coherence=float(eval_scores.get("coherence", 0.0)),
+                    context_precision=float(eval_scores.get("context_precision", 0.0)),
+                    citation_accuracy=float(eval_scores.get("citation_accuracy", 0.0)),
+                    hallucination_rate=float(eval_scores.get("hallucination_rate", 0.0)),
+                    overall_score=float(eval_result.overall_score),
+                    feedback=eval_result.build_combined_feedback(),
+                    latency_ms=latency_ms,
+                )
+                db_session.add(db_eval)
+                await db_session.commit()
+                logger.info(f"[BackgroundEval] Successfully saved evaluation results for message {message_id}")
+            else:
+                logger.error(f"[BackgroundEval] Message {message_id} not found in DB")
+
+        # 4. Record metrics in Prometheus
+        from src.eval.prometheus_metrics import HALLUCINATION_RATE_HIST, EVAL_SCORE_HIST
+        EVAL_SCORE_HIST.observe(float(eval_result.overall_score))
+        HALLUCINATION_RATE_HIST.observe(float(eval_result.hallucination_rate))
+
+    except Exception as exc:
+        logger.error(f"[BackgroundEval] Error running background evaluation: {exc}")
